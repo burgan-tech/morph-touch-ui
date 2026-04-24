@@ -507,8 +507,13 @@ export function ChatManagement() {
           listInstances('portfolio-manager', { pageSize: 100 }),
           listInstances('investment-advisor', { pageSize: 100 }),
         ]);
-        const pmItems = (pmRes.ok && (pmRes.data as { items?: Array<{ key: string; attributes?: Record<string, unknown> }> })?.items) ?? [];
-        const iaItems = (iaRes.ok && (iaRes.data as { items?: Array<{ key: string; attributes?: Record<string, unknown> }> })?.items) ?? [];
+        type AdvisorItem = { key: string; attributes?: Record<string, unknown> };
+        const pmItems: AdvisorItem[] = pmRes.ok
+          ? (pmRes.data as { items?: AdvisorItem[] })?.items ?? []
+          : [];
+        const iaItems: AdvisorItem[] = iaRes.ok
+          ? (iaRes.data as { items?: AdvisorItem[] })?.items ?? []
+          : [];
         const buildName = (inst: { key: string; attributes?: Record<string, unknown> }) => {
           const a = inst.attributes ?? {};
           const first = (a.firstName ?? a.name ?? '') as string;

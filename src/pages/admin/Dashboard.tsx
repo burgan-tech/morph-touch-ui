@@ -33,17 +33,6 @@ interface ApiData<T> {
   [key: string]: unknown;
 }
 
-function extractItems<T>(res: { ok: boolean; data?: unknown }, ...keys: string[]): T[] {
-  if (!res.ok || !res.data) return [];
-  const d = res.data as Record<string, unknown>;
-  let data: Record<string, unknown> = d;
-  for (const k of keys) {
-    if (d[k] && typeof d[k] === 'object') data = d[k] as Record<string, unknown>;
-  }
-  const items = (data?.items as T[]) ?? [];
-  return Array.isArray(items) ? items : [];
-}
-
 function extractReservations<T>(res: { ok: boolean; data?: unknown }): T[] {
   if (!res.ok || !res.data) return [];
   const d = res.data as ApiData<T>;
@@ -246,7 +235,7 @@ export function Dashboard() {
     const endMs = end ? new Date(end).getTime() : startMs + 86400000;
     if (isNaN(endMs)) return false;
     if (startMs > now || endMs < now) return false;
-    const st = (a.metadata?.currentState ?? (a as Record<string, unknown>).currentState) as string | undefined;
+    const st = (a.metadata?.currentState ?? (a as unknown as Record<string, unknown>).currentState) as string | undefined;
     const validStates = ['active', 'approved', 'complete', 'complete-with-transfer'];
     return !st || validStates.includes(st);
   });
