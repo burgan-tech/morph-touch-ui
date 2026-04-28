@@ -120,7 +120,7 @@ export function Dashboard() {
     setLoading(true);
     try {
       const [rezRes, personalLeaveRes, pmRes, iaRes, chatListRes] = await Promise.all([
-        getReservations({}, { touchUser: 'admin', userType: 'admin' }),
+        getReservations({ touchUser: 'admin', userType: 'admin' }),
         getAbsenceEntries({ absenceType: 'personal-leave', pageSize: '200' }),
         listInstances('portfolio-manager', { pageSize: 100 }),
         listInstances('investment-advisor', { pageSize: 100 }),

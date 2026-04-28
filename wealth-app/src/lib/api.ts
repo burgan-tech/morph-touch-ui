@@ -1,7 +1,4 @@
-/** Override with e.g. `VITE_MORPH_TOUCH_API_BASE=https://api.example.com/api/v1/morph-touch` (no trailing slash). */
-const BASE_URL =
-  (import.meta.env.VITE_MORPH_TOUCH_API_BASE as string | undefined)?.replace(/\/$/, '') ||
-  '/api/v1/morph-touch';
+const BASE_URL = '/api/v1/morph-touch';
 
 interface ApiResponse<T = unknown> {
   ok: boolean;
@@ -102,11 +99,8 @@ export function callFlowFunction(
 
 // Convenience wrappers
 /** Headers: touchUser, userType (customer|advisor|manager|admin); optional startDate, endDate. */
-export function getReservations(
-  queryParams: Record<string, string> = {},
-  headers: Record<string, string>
-) {
-  return callFunction('get-rezervations', queryParams, headers);
+export function getReservations(headers: Record<string, string>) {
+  return callFunction('get-rezervations', {}, headers);
 }
 
 export function getAvailableSlots(advisorId: string, date: string, duration?: string) {
@@ -119,12 +113,9 @@ export function getAbsenceEntries(params: Record<string, string> = {}) {
   return callFunction('get-absence-entry', params);
 }
 
-/** Query params: e.g. pageSize. Headers: touchUser, userType (customer|advisor|admin); optional roomType, state. */
-export function getChatRooms(
-  queryParams: Record<string, string> = {},
-  headers: Record<string, string>
-) {
-  return callFlowFunction('chat-room', 'get-chat-rooms', queryParams, headers);
+/** Headers: touchUser, userType (customer|advisor|admin); optional roomType, state. */
+export function getChatRooms(headers: Record<string, string>) {
+  return callFunction('get-chat-rooms', {}, headers);
 }
 
 /** Query: limit, from, pageSize. Headers: roomId, touchUser (Matrix user id). */

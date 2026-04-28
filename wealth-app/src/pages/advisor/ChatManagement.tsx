@@ -260,7 +260,7 @@ export function ChatManagement() {
   const fetchRooms = useCallback(async (): Promise<ChatRoomInstance[]> => {
     setLoading(true);
     try {
-      const res = await getChatRooms({ pageSize: '1' }, { touchUser: ADVISOR_ID, userType: 'advisor' });
+      const res = await getChatRooms({ touchUser: ADVISOR_ID, userType: 'advisor' });
       const list = extractRooms(res);
       const filtered = list.filter((r) => (r.metadata?.currentState ?? '') !== 'failed');
       setRooms(filtered);

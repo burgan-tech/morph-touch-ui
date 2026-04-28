@@ -38,8 +38,8 @@ export function Dashboard() {
     setLoading(true);
     try {
       const [rezRes, chatRes] = await Promise.all([
-        getReservations({}, { touchUser: ADVISOR_ID, userType: 'advisor' }),
-        getChatRooms({ pageSize: '1' }, { touchUser: ADVISOR_ID, userType: 'advisor' }),
+        getReservations({ touchUser: ADVISOR_ID, userType: 'advisor' }),
+        getChatRooms({ touchUser: ADVISOR_ID, userType: 'advisor' }),
       ]);
 
       const rezItems = extractItems<VnextInstance>(rezRes, 'getRezervations', 'get-rezervations');
