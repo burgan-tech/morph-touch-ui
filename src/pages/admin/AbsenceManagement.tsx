@@ -49,11 +49,6 @@ function advisorDisplayName(inst: VnextInstance): string {
   return (a.registryNumber as string) || (a.advisorId as string) || inst.key || '—';
 }
 
-function fullAdvisorRef(inst: VnextInstance): string {
-  const wf = inst._source === 'IA' ? 'investment-advisor' : 'portfolio-manager';
-  return `morph-touch.${wf}.${inst.key}`;
-}
-
 function advisorRole(inst: VnextInstance): string {
   if (inst._source === 'IA') return 'YD';
   if (inst._source === 'PM') return 'PY';

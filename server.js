@@ -2,10 +2,10 @@ import { createServer } from 'http';
 import { readFileSync } from 'fs';
 import { resolve, extname } from 'path';
 
-const PORT = 3000;
-const API_TARGET = 'http://localhost:4201';
-const MATRIX_TARGET = 'http://localhost:9080';
-const DIST_DIR = resolve(import.meta.dirname, 'dist');
+const PORT = Number(process.env.PORT) || 3000;
+const API_TARGET = process.env.API_TARGET || 'http://localhost:4201';
+const MATRIX_TARGET = process.env.MATRIX_TARGET || 'http://localhost:9080';
+const DIST_DIR = process.env.DIST_DIR || resolve(import.meta.dirname, 'dist');
 
 const MIME = {
   '.html': 'text/html',
