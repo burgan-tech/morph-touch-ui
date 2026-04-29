@@ -220,7 +220,7 @@ export function Chat() {
     if (!customerId) return;
     setLoading(true);
     try {
-      const res = await getChatRooms({ pageSize: '1' }, { touchUser: customerId, userType: 'customer' });
+      const res = await getChatRooms({ touchUser: customerId, userType: 'customer' });
       const list = extractRooms(res);
       const active = list.filter((r) => {
         const st = r.metadata?.currentState;

@@ -155,7 +155,7 @@ export function Appointments() {
   const fetchReservations = useCallback(async (filters: { startDate: string; endDate: string; status: string }) => {
     setLoading(true);
     try {
-      const res = await getReservations({}, { touchUser: ADVISOR_ID, userType: 'advisor' });
+      const res = await getReservations({ touchUser: ADVISOR_ID, userType: 'advisor' });
       let items = extractItems<ReservationInstance>(res);
       if (filters.startDate) {
         items = items.filter((r) => {

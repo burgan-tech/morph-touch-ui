@@ -368,7 +368,7 @@ export function VideoCalls() {
   const fetchReservations = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await getReservations({}, { touchUser: ADVISOR_ID, userType: 'advisor' });
+      const res = await getReservations({ touchUser: ADVISOR_ID, userType: 'advisor' });
       const items = extractItems<ReservationInstance>(res);
       setReservations(items);
       if (!res.ok) {

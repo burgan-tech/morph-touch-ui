@@ -89,7 +89,7 @@ export function Appointments() {
   const fetchReservations = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await getReservations({}, { touchUser: 'admin', userType: 'admin' });
+      const res = await getReservations({ touchUser: 'admin', userType: 'admin' });
       const items = extractItems<ReservationInstance>(res);
       setReservations(items);
       if (!res.ok) {

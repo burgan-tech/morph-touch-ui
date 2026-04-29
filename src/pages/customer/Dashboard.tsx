@@ -243,7 +243,7 @@ export function Dashboard() {
     if (!customerId) return;
     setLoadingRes(true);
     try {
-      const res = await getReservations({}, { touchUser: customerId, userType: 'customer' });
+      const res = await getReservations({ touchUser: customerId, userType: 'customer' });
       setReservations(extractReservations(res));
     } catch (e) {
       toast(String(e), 'error');
@@ -256,7 +256,7 @@ export function Dashboard() {
     if (!customerId) return;
     setLoadingRooms(true);
     try {
-      const res = await getChatRooms({ pageSize: '1' }, { touchUser: customerId, userType: 'customer' });
+      const res = await getChatRooms({ touchUser: customerId, userType: 'customer' });
       const list = extractChatRooms(res);
       setRooms(list.filter((r) => (r.status ?? '') !== 'deactivated'));
     } catch (e) {
