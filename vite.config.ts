@@ -10,6 +10,7 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:4201',
         changeOrigin: true,
+        secure: false,
       },
       '/_matrix': {
         target: 'http://localhost:9080',

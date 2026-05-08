@@ -54,7 +54,7 @@ export function VideoRecords() {
       if (appliedFilters.startDate) headers.startDate = appliedFilters.startDate;
       if (appliedFilters.endDate) headers.endDate = appliedFilters.endDate;
 
-      const res = await getReservations({}, headers);
+      const res = await getReservations(headers);
       const items = extractItems<ReservationInstance>(res);
       setReservations(items);
 

@@ -48,6 +48,7 @@ interface ChatMessage {
   msgtype?: string;
   isMine?: boolean;
   read?: boolean;
+  failed?: boolean;
 }
 
 /* ── extraction helpers (identical to customer Chat.tsx) ── */
@@ -253,14 +254,14 @@ export function ChatManagement() {
   const statusDropdownRef = useRef<HTMLDivElement>(null);
   const syncTokenRef = useRef<string | null>(null);
   const syncAbortedRef = useRef(false);
-  const lastSendRef = useRef<{ body: string; at: number } | null>(null);
+  const inFlightRef = useRef(false);
 
   /* ── fetch rooms (same as customer, advisor param instead of user) ── */
 
   const fetchRooms = useCallback(async (): Promise<ChatRoomInstance[]> => {
     setLoading(true);
     try {
-      const res = await getChatRooms({ pageSize: '1' }, { touchUser: ADVISOR_ID, userType: 'advisor' });
+      const res = await getChatRooms({ touchUser: ADVISOR_ID, userType: 'advisor' });
       const list = extractRooms(res);
       const filtered = list.filter((r) => (r.metadata?.currentState ?? '') !== 'failed');
       setRooms(filtered);
@@ -289,7 +290,7 @@ export function ChatManagement() {
         if (matrixRoomId) {
           const res = await getRoomMessages(
             { limit: '50', pageSize: '1' },
-            { roomId: matrixRoomId, touchUser: ADVISOR_ID }
+            { roomId: matrixRoomId, touchUser: ADVISOR_ID, userType: 'advisor' }
           );
           const apiMsgs = extractMessages(res);
           const advisorMatrixId = `@${ADVISOR_ID}:localhost`;
@@ -326,8 +327,15 @@ export function ChatManagement() {
     const runSyncLoop = async () => {
       if (syncAbortedRef.current) return;
       try {
-        const params: { user: string; timeout: string; roomId: string; since?: string } = {
+        const params: {
+          user: string;
+          userType: string;
+          timeout: string;
+          roomId: string;
+          since?: string;
+        } = {
           user: ADVISOR_ID,
+          userType: 'advisor',
           timeout: syncTokenRef.current ? '30000' : '0',
           roomId: matrixRoomId,
         };
@@ -377,36 +385,49 @@ export function ChatManagement() {
   const handleSend = async () => {
     const text = inputText.trim();
     if (!text || !selectedRoom) return;
-    if (sending) return;
+    if (inFlightRef.current) return;
     const matrixRoomId = getMatrixRoomId(selectedRoom);
     if (!matrixRoomId) {
       toast('Oda bilgisi bulunamadı.', 'error');
       return;
     }
-    if (lastSendRef.current && lastSendRef.current.body === text && Date.now() - lastSendRef.current.at < 2000) {
-      return;
-    }
-    lastSendRef.current = { body: text, at: Date.now() };
+
+    inFlightRef.current = true;
     setSending(true);
+
+    const tempId = `${PENDING_PREFIX}${Date.now()}`;
+    setMessages((prev) => [
+      ...prev,
+      {
+        eventId: tempId,
+        body: text,
+        sender: `@${ADVISOR_ID}:localhost`,
+        timestamp: Date.now(),
+        isMine: true,
+        read: false,
+        failed: false,
+      },
+    ]);
+    setInputText('');
+
     try {
-      await sendRoomMessage(matrixRoomId, ADVISOR_ID, text);
-      setInputText('');
-      setMessages((prev) => [
-        ...prev,
-        {
-          eventId: `${PENDING_PREFIX}${Date.now()}`,
-          body: text,
-          sender: `@${ADVISOR_ID}:localhost`,
-          timestamp: Date.now(),
-          isMine: true,
-          read: false,
-        },
-      ]);
+      const res = await sendRoomMessage(matrixRoomId, ADVISOR_ID, text, { userType: 'advisor' });
+      if (!res.ok) throw new Error(`HTTP ${res.status || 'error'}`);
     } catch (e) {
-      toast(String(e) || 'Mesaj gönderilemedi', 'error');
+      setMessages((prev) =>
+        prev.map((m) => (m.eventId === tempId ? { ...m, failed: true } : m))
+      );
+      toast(e instanceof Error ? e.message : String(e) || 'Mesaj gönderilemedi', 'error');
     } finally {
+      inFlightRef.current = false;
       setSending(false);
     }
+  };
+
+  const retryFailedMessage = (msg: ChatMessage) => {
+    if (!msg.body) return;
+    setMessages((prev) => prev.filter((m) => m.eventId !== msg.eventId));
+    setInputText(msg.body);
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -507,13 +528,8 @@ export function ChatManagement() {
           listInstances('portfolio-manager', { pageSize: 100 }),
           listInstances('investment-advisor', { pageSize: 100 }),
         ]);
-        type AdvisorItem = { key: string; attributes?: Record<string, unknown> };
-        const pmItems: AdvisorItem[] = pmRes.ok
-          ? (pmRes.data as { items?: AdvisorItem[] })?.items ?? []
-          : [];
-        const iaItems: AdvisorItem[] = iaRes.ok
-          ? (iaRes.data as { items?: AdvisorItem[] })?.items ?? []
-          : [];
+        const pmItems = (pmRes.ok && (pmRes.data as { items?: Array<{ key: string; attributes?: Record<string, unknown> }> })?.items) ?? [];
+        const iaItems = (iaRes.ok && (iaRes.data as { items?: Array<{ key: string; attributes?: Record<string, unknown> }> })?.items) ?? [];
         const buildName = (inst: { key: string; attributes?: Record<string, unknown> }) => {
           const a = inst.attributes ?? {};
           const first = (a.firstName ?? a.name ?? '') as string;
@@ -788,14 +804,39 @@ export function ChatManagement() {
                     <Fragment key={date}>
                       <div className="chat-date-divider">{date}</div>
                       {msgs.map((m, i) => (
-                        <div key={m.eventId ?? i} className={cn('chat-msg', m.isMine ? 'mine' : 'theirs')}>
+                        <div
+                          key={m.eventId ?? i}
+                          className={cn('chat-msg', m.isMine ? 'mine' : 'theirs', m.failed && 'failed')}
+                        >
                           {!m.isMine && (
                             <div className="chat-msg-sender">
                               {m.sender?.replace(/@|:.*/g, '') || 'Müşteri'}
                             </div>
                           )}
                           <div className="chat-msg-body">{m.body ?? m.content ?? ''}</div>
-                          <div className="chat-msg-meta">{formatTime(m.timestamp)}</div>
+                          <div className="chat-msg-meta">
+                            {formatTime(m.timestamp)}
+                            {m.failed && (
+                              <>
+                                {' · '}
+                                <button
+                                  type="button"
+                                  onClick={() => retryFailedMessage(m)}
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    color: 'var(--color-danger, #c00)',
+                                    padding: 0,
+                                    cursor: 'pointer',
+                                    textDecoration: 'underline',
+                                    font: 'inherit',
+                                  }}
+                                >
+                                  Gönderilemedi — tekrar dene
+                                </button>
+                              </>
+                            )}
+                          </div>
                         </div>
                       ))}
                     </Fragment>
@@ -804,7 +845,13 @@ export function ChatManagement() {
                 <div ref={messagesEndRef} />
               </div>
 
-              <div className="chat-input-area">
+              <form
+                className="chat-input-area"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleSend();
+                }}
+              >
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -813,6 +860,7 @@ export function ChatManagement() {
                   onChange={handleFileSelect}
                 />
                 <button
+                  type="button"
                   className="btn-icon"
                   onClick={() => fileInputRef.current?.click()}
                   title="Dosya ekle"
@@ -826,18 +874,17 @@ export function ChatManagement() {
                   placeholder={isRoomDeactivated ? 'Görüşme pasif. Aktife almak için yukarıdaki menüyü kullanın.' : 'Mesaj yazın...'}
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
-                  disabled={isRoomDeactivated}
+                  disabled={isRoomDeactivated || !getMatrixRoomId(selectedRoom)}
                 />
                 <button
+                  type="submit"
                   className="btn btn-primary btn-sm"
-                  onClick={handleSend}
-                  disabled={sending || !inputText.trim() || isRoomDeactivated}
+                  disabled={sending || !inputText.trim() || isRoomDeactivated || !getMatrixRoomId(selectedRoom)}
                 >
                   <Send size={14} />
                   Gönder
                 </button>
-              </div>
+              </form>
             </>
           ) : (
             <div className="empty-state" style={{ flex: 1 }}>

@@ -67,7 +67,7 @@ export function Dashboard() {
     setLoading(true);
     try {
       const [rezRes, chatRes] = await Promise.all([
-        getReservations({}, { touchUser: 'admin', userType: 'admin' }),
+        getReservations({ touchUser: 'admin', userType: 'admin' }),
         listInstances('chat-room', { pageSize: 50 }),
       ]);
 

@@ -53,7 +53,11 @@ export async function getPresence(advisorId: string): Promise<{ ok: boolean; sta
   try {
     const res = await fetch(url, {
       method: 'GET',
-      headers: { 'X-Matrix-User': xMatrixUser },
+      headers: {
+        'X-Matrix-User': xMatrixUser,
+        sub: xMatrixUser,
+        act_sub: xMatrixUser,
+      },
     });
     const data = (await res.json().catch(() => null)) as PresenceResponse | null;
     if (!res.ok) {
@@ -81,6 +85,8 @@ export async function setPresence(advisorId: string, uiStatus: PresenceStatus): 
       headers: {
         'Content-Type': 'application/json',
         'X-Matrix-User': xMatrixUser,
+        sub: xMatrixUser,
+        act_sub: xMatrixUser,
       },
       body: JSON.stringify(body),
     });

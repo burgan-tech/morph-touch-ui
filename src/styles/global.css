@@ -534,6 +534,9 @@ tr:hover td { background: #f8fafc; }
 /* === Advisor Select === */
 .advisor-list { display: flex; flex-direction: column; gap: 8px; max-width: 480px; margin: 0 auto; max-height: 400px; overflow-y: auto; }
 .advisor-card { display: flex; align-items: center; gap: 12px; width: 100%; padding: 14px 16px; background: var(--color-surface); border: 1px solid var(--color-border); border-radius: var(--radius-lg); text-align: left; transition: all var(--transition); color: var(--color-text); }
+.advisor-card input.role-select-input { min-width: 0; }
+.role-select-input { max-width: 160px; padding: 6px 10px; font-size: 12px; font-family: inherit; border: 1px solid var(--color-border); border-radius: var(--radius); background: var(--color-bg); color: var(--color-text); }
+.role-select-input:focus { outline: 2px solid var(--color-primary); outline-offset: 1px; }
 .advisor-card:hover { border-color: var(--color-primary); box-shadow: var(--shadow); }
 .advisor-card-icon { width: 40px; height: 40px; border-radius: 50%; background: #eff6ff; display: flex; align-items: center; justify-content: center; color: var(--color-primary); flex-shrink: 0; }
 .advisor-card-info { flex: 1; display: flex; flex-direction: column; gap: 2px; min-width: 0; }

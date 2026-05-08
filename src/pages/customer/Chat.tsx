@@ -36,6 +36,7 @@ interface ChatMessage {
   msgtype?: string;
   isMine?: boolean;
   read?: boolean;
+  failed?: boolean;
 }
 
 /** Backend can return flat rooms (instanceKey, advisorId, roomType, roomId) or nested (key, attributes). */
@@ -214,13 +215,13 @@ export function Chat() {
   const openAdvisorTriedRef = useRef(false);
   const syncTokenRef = useRef<string | null>(null);
   const syncAbortedRef = useRef(false);
-  const lastSendRef = useRef<{ body: string; at: number } | null>(null);
+  const inFlightRef = useRef(false);
 
   const fetchRooms = useCallback(async () => {
     if (!customerId) return;
     setLoading(true);
     try {
-      const res = await getChatRooms({ pageSize: '1' }, { touchUser: customerId, userType: 'customer' });
+      const res = await getChatRooms({ touchUser: customerId, userType: 'customer' });
       const list = extractRooms(res);
       const active = list.filter((r) => {
         const st = r.metadata?.currentState;
@@ -349,36 +350,49 @@ export function Chat() {
   const handleSend = async () => {
     const text = inputText.trim();
     if (!text || !selectedRoom || !customerId) return;
-    if (sending) return;
+    if (inFlightRef.current) return;
     const matrixRoomId = getMatrixRoomId(selectedRoom);
     if (!matrixRoomId) {
       toast('Oda bilgisi bulunamadı.', 'error');
       return;
     }
-    if (lastSendRef.current && lastSendRef.current.body === text && Date.now() - lastSendRef.current.at < 2000) {
-      return;
-    }
-    lastSendRef.current = { body: text, at: Date.now() };
+
+    inFlightRef.current = true;
     setSending(true);
+
+    const tempId = `${PENDING_PREFIX}${Date.now()}`;
+    setMessages((prev) => [
+      ...prev,
+      {
+        eventId: tempId,
+        body: text,
+        sender: `@${customerId}:localhost`,
+        timestamp: Date.now(),
+        isMine: true,
+        read: false,
+        failed: false,
+      },
+    ]);
+    setInputText('');
+
     try {
-      await sendRoomMessage(matrixRoomId, customerId, text);
-      setInputText('');
-      setMessages((prev) => [
-        ...prev,
-        {
-          eventId: `${PENDING_PREFIX}${Date.now()}`,
-          body: text,
-          sender: `@${customerId}:localhost`,
-          timestamp: Date.now(),
-          isMine: true,
-          read: false,
-        },
-      ]);
+      const res = await sendRoomMessage(matrixRoomId, customerId, text);
+      if (!res.ok) throw new Error(`HTTP ${res.status || 'error'}`);
     } catch (e) {
-      toast(String(e) || 'Mesaj gönderilemedi', 'error');
+      setMessages((prev) =>
+        prev.map((m) => (m.eventId === tempId ? { ...m, failed: true } : m))
+      );
+      toast(e instanceof Error ? e.message : String(e) || 'Mesaj gönderilemedi', 'error');
     } finally {
+      inFlightRef.current = false;
       setSending(false);
     }
+  };
+
+  const retryFailedMessage = (msg: ChatMessage) => {
+    if (!msg.body) return;
+    setMessages((prev) => prev.filter((m) => m.eventId !== msg.eventId));
+    setInputText(msg.body);
   };
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -482,14 +496,39 @@ export function Chat() {
                     <Fragment key={date}>
                       <div className="chat-date-divider">{date}</div>
                       {msgs.map((m, i) => (
-                        <div key={m.eventId ?? i} className={cn('chat-msg', m.isMine ? 'mine' : 'theirs')}>
+                        <div
+                          key={m.eventId ?? i}
+                          className={cn('chat-msg', m.isMine ? 'mine' : 'theirs', m.failed && 'failed')}
+                        >
                           {!m.isMine && (
                             <div className="chat-msg-sender">
                               {m.sender?.replace(/@|:.*/g, '') || 'Danışman'}
                             </div>
                           )}
                           <div className="chat-msg-body">{m.body ?? m.content ?? ''}</div>
-                          <div className="chat-msg-meta">{formatTime(m.timestamp)}</div>
+                          <div className="chat-msg-meta">
+                            {formatTime(m.timestamp)}
+                            {m.failed && (
+                              <>
+                                {' · '}
+                                <button
+                                  type="button"
+                                  onClick={() => retryFailedMessage(m)}
+                                  style={{
+                                    background: 'none',
+                                    border: 'none',
+                                    color: 'var(--color-danger, #c00)',
+                                    padding: 0,
+                                    cursor: 'pointer',
+                                    textDecoration: 'underline',
+                                    font: 'inherit',
+                                  }}
+                                >
+                                  Gönderilemedi — tekrar dene
+                                </button>
+                              </>
+                            )}
+                          </div>
                         </div>
                       ))}
                     </Fragment>
@@ -498,7 +537,13 @@ export function Chat() {
                 <div ref={messagesEndRef} />
               </div>
 
-              <div className="chat-input-area">
+              <form
+                className="chat-input-area"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  handleSend();
+                }}
+              >
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -507,6 +552,7 @@ export function Chat() {
                   onChange={handleFileSelect}
                 />
                 <button
+                  type="button"
                   className="btn-icon"
                   onClick={() => fileInputRef.current?.click()}
                   title="Dosya ekle"
@@ -520,17 +566,17 @@ export function Chat() {
                   placeholder="Mesaj yazın..."
                   value={inputText}
                   onChange={(e) => setInputText(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && handleSend()}
+                  disabled={!getMatrixRoomId(selectedRoom)}
                 />
                 <button
+                  type="submit"
                   className="btn btn-primary btn-sm"
-                  onClick={handleSend}
-                  disabled={sending || !inputText.trim()}
+                  disabled={sending || !inputText.trim() || !getMatrixRoomId(selectedRoom)}
                 >
                   <Send size={14} />
                   Gönder
                 </button>
-              </div>
+              </form>
             </>
           ) : (
             <div className="empty-state" style={{ flex: 1 }}>

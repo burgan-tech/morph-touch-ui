@@ -1,6 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { useRole } from './hooks/useRole';
-import type { Role } from './lib/constants';
 import { AdvisorProvider, useAdvisorContext } from './contexts/AdvisorContext';
 import { CustomerProvider, useCustomerContext } from './contexts/CustomerContext';
 import { AppLayout } from './components/layout/AppLayout';
@@ -35,7 +34,7 @@ function AppInner() {
         <RoleSelect
           onSelect={handleRoleSelect}
           onAdvisorSelect={(id, type, name) => setAdvisor(id, type, name)}
-          onCustomerSelect={(id, segment) => setCustomer(id, segment)}
+          onCustomerSelect={(id, segment, pmKey, iaKey) => setCustomer(id, segment, pmKey, iaKey)}
         />
         <ToastContainer />
       </>
