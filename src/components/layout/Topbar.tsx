@@ -4,9 +4,10 @@ import { STATUS_OPTIONS } from '../../lib/constants';
 import type { Role } from '../../lib/constants';
 import { useAdvisorContext } from '../../contexts/AdvisorContext';
 import { useCustomerContext } from '../../contexts/CustomerContext';
-import { getPresence, setPresence } from '../../lib/matrixPresence';
+import { setPresence } from '../../lib/matrixPresence';
 import type { PresenceStatus } from '../../lib/matrixPresence';
-import { toast } from '../../components/ui';
+import { getAdvisorPresence } from '../../lib/api';
+import { toast } from '../ui';
 
 interface TopbarProps {
   role: Role;
@@ -16,24 +17,48 @@ interface TopbarProps {
 }
 
 const TYPE_LABELS = { PM: 'Portföy Yöneticisi', IA: 'Yatırım Danışmanı' } as const;
+const ON_LEAVE_LABEL = 'İzinli';
+const ON_LEAVE_TOOLTIP = 'İzinlisiniz; durumunuz değiştirilemez.';
 
 export function Topbar({ role, collapsed, onToggle, onLogout }: TopbarProps) {
   const { advisorId, advisorName, advisorType } = useAdvisorContext();
   const { customerId, segment } = useCustomerContext();
   const [status, setStatus] = useState<PresenceStatus>('online');
+  const [onLeave, setOnLeave] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [statusLoading, setStatusLoading] = useState(false);
   const currentStatus = STATUS_OPTIONS.find((s) => s.value === status) || STATUS_OPTIONS[0];
+  const presenceDisabled = onLeave || statusLoading;
 
   useEffect(() => {
     if (role !== 'advisor' || !advisorId) return;
-    getPresence(advisorId).then((res) => {
-      if (res.ok && res.status) setStatus(res.status);
-    });
+    let cancelled = false;
+    const refresh = () => {
+      getAdvisorPresence(advisorId).then((res) => {
+        if (cancelled) return;
+        if (res.ok) {
+          setStatus(res.presence as PresenceStatus);
+          setOnLeave(res.onLeave);
+        }
+      });
+    };
+    refresh();
+    // Periodic refresh so the badge flips when the timer-driven state change
+    // happens server-side (auto-leave-start / auto-leave-end transitions).
+    const interval = window.setInterval(refresh, 30_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
   }, [role, advisorId]);
 
   const handleStatusChange = async (newStatus: PresenceStatus) => {
     if (!advisorId || statusLoading) return;
+    if (onLeave) {
+      toast(ON_LEAVE_TOOLTIP, 'error');
+      setDropdownOpen(false);
+      return;
+    }
     setStatusLoading(true);
     setDropdownOpen(false);
     const res = await setPresence(advisorId, newStatus);
@@ -57,14 +82,25 @@ export function Topbar({ role, collapsed, onToggle, onLogout }: TopbarProps) {
       <div className="topbar-right">
         {role === 'advisor' && advisorId && (
           <div
-            className="status-selector"
-            style={{ opacity: statusLoading ? 0.7 : 1, pointerEvents: statusLoading ? 'none' : 'auto' }}
-            onClick={() => setDropdownOpen(!dropdownOpen)}
+            className={`status-selector${onLeave ? ' status-selector--on-leave' : ''}`}
+            title={onLeave ? ON_LEAVE_TOOLTIP : undefined}
+            style={{
+              opacity: statusLoading ? 0.7 : 1,
+              pointerEvents: presenceDisabled ? 'none' : 'auto',
+              cursor: presenceDisabled ? 'not-allowed' : 'pointer',
+            }}
+            onClick={() => {
+              if (presenceDisabled) return;
+              setDropdownOpen(!dropdownOpen);
+            }}
           >
-            <span className="status-dot" style={{ background: currentStatus.color }} />
-            <span className="status-label">{currentStatus.label}</span>
+            <span
+              className="status-dot"
+              style={{ background: onLeave ? '#9ca3af' : currentStatus.color }}
+            />
+            <span className="status-label">{onLeave ? ON_LEAVE_LABEL : currentStatus.label}</span>
             <ChevronDown size={14} />
-            {dropdownOpen && (
+            {dropdownOpen && !onLeave && (
               <div className="status-dropdown">
                 {STATUS_OPTIONS.map((opt) => (
                   <button

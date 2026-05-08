@@ -4,9 +4,18 @@ import { resolve, extname } from 'path';
 
 const PORT = Number(process.env.PORT) || 3000;
 const API_TARGET = process.env.API_TARGET || 'http://localhost:4201';
+const API_ALLOW_INSECURE_TLS = process.env.API_ALLOW_INSECURE_TLS !== 'false';
 const MATRIX_TARGET = process.env.MATRIX_TARGET || 'http://localhost:9080';
 const DIST_DIR = process.env.DIST_DIR || resolve(import.meta.dirname, 'dist');
 
+if (API_TARGET.startsWith('https://') && API_ALLOW_INSECURE_TLS) {
+  // Mirrors Vite proxy `secure: false` for self-signed/nonprod certificates.
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
+if (MATRIX_TARGET.startsWith('https://') && API_ALLOW_INSECURE_TLS) {
+  // Mirrors Vite proxy `secure: false` for self-signed/nonprod certificates.
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
 const MIME = {
   '.html': 'text/html',
   '.js': 'application/javascript',

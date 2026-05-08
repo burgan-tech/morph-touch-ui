@@ -55,22 +55,99 @@ function userName(ref: unknown): string {
   return '—';
 }
 
-function advisorKeyMatchesRoomType(key: string, advisorType: string | undefined): boolean {
-  const t = (advisorType ?? '').trim().toUpperCase();
-  if (t === 'PM') return key.includes('pm');
-  if (t === 'IA') return key.includes('ia');
-  return true;
+/** Portfolio branch advisor row from transfer / portfolio-info (or legacy string key). */
+type BranchAdvisorRef = { code: string; fullName?: string; imageUrl?: string };
+
+function parseBranchAdvisorRefList(raw: unknown): BranchAdvisorRef[] {
+  if (!Array.isArray(raw)) return [];
+  const out: BranchAdvisorRef[] = [];
+  for (const x of raw) {
+    if (typeof x === 'string' && x.trim()) {
+      out.push({ code: x.trim(), fullName: '', imageUrl: '' });
+      continue;
+    }
+    if (x && typeof x === 'object' && 'code' in x) {
+      const o = x as Record<string, unknown>;
+      const code = String(o.code ?? '').trim();
+      if (!code) continue;
+      out.push({
+        code,
+        fullName: o.fullName != null ? String(o.fullName) : '',
+        imageUrl: o.imageUrl != null ? String(o.imageUrl) : '',
+      });
+    }
+  }
+  return out;
 }
 
-/** Exclude advisors already in the room (Chat Yönetimi or önceki atamalar) — aligns with ChatManagement. */
-function getFilteredAdvisorKeysForRoom(
-  baseKeys: string[],
+function advisorCodesFromRefs(refs: BranchAdvisorRef[]): string[] {
+  return [...new Set(refs.map((r) => r.code).filter(Boolean))];
+}
+
+function availableEntryToCode(x: unknown): string {
+  if (typeof x === 'string') return x.trim();
+  if (x && typeof x === 'object' && 'code' in x) return String((x as BranchAdvisorRef).code).trim();
+  return '';
+}
+
+function formatAvailableAdvisorsList(list: unknown[] | undefined): string {
+  if (!list?.length) return '';
+  return list
+    .map((x) => {
+      if (typeof x === 'string') return x;
+      if (x && typeof x === 'object' && 'code' in (x as object)) {
+        const o = x as BranchAdvisorRef;
+        return (o.fullName || o.code || '').trim() || o.code;
+      }
+      return '';
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
+/** Exclude branch codes already listed as room occupants (Matrix ids in occupied rarely match bank codes). */
+function getFilteredAdvisorCodesForRoom(
+  baseCodes: string[],
   room: { advisorType?: string; occupiedAdvisorIds?: string[] }
 ): string[] {
   const occupied = new Set((room.occupiedAdvisorIds ?? []).map((x) => String(x).trim()).filter(Boolean));
-  return baseKeys.filter(
-    (k) => advisorKeyMatchesRoomType(k, room.advisorType) && !occupied.has(k)
-  );
+  return baseCodes.filter((code) => !occupied.has(code));
+}
+
+function advisorOptionLabel(code: string, refByCode: Map<string, BranchAdvisorRef>): string {
+  const ref = refByCode.get(code);
+  const name = ref?.fullName?.trim();
+  return name ? `${name} (${code})` : code;
+}
+
+/**
+ * Selects the most relevant transfer instance for the active advisor.
+ * Preference order:
+ *   1. exact key match (when caller knows the expected key)
+ *   2. most recent instance whose key starts with `transfer-leave-${advisorId}-` AND status === 'A'
+ *   3. most recent instance whose key starts with `transfer-leave-${advisorId}-` (any status)
+ *   4. null (intentionally NOT falling back to transfers[0] — that pins to the oldest test record).
+ */
+function pickRelevantTransfer(
+  transfers: VnextInstance[],
+  advisorId: string,
+  expectedKey?: string
+): VnextInstance | null {
+  if (!Array.isArray(transfers) || transfers.length === 0) return null;
+  if (expectedKey) {
+    const exact = transfers.find((t) => t.key === expectedKey);
+    if (exact) return exact;
+  }
+  const prefix = `transfer-leave-${advisorId}-`;
+  const matching = transfers.filter((t) => (t.key ?? '').startsWith(prefix));
+  if (matching.length === 0) return null;
+  const score = (t: VnextInstance) =>
+    new Date((t.metadata?.createdAt as string) ?? 0).getTime() || 0;
+  const active = matching
+    .filter((t) => (t.metadata?.status as string) === 'A')
+    .sort((a, b) => score(b) - score(a));
+  if (active.length > 0) return active[0];
+  return matching.slice().sort((a, b) => score(b) - score(a))[0] ?? null;
 }
 
 export function Absence() {
@@ -124,20 +201,40 @@ export function Absence() {
     }
   }, []);
 
-  const allAdvisorKeys = (transferInstance?.attributes?.allAdvisorKeys as string[]) ?? [];
+  const parsedTransferAdvisorRefs = parseBranchAdvisorRefList(transferInstance?.attributes?.allAdvisorKeys);
   /** First filled participant Matrix id — used as fallback for other rows (API field: targetAdvisor). */
   const defaultParticipantMatrixId =
     Object.values(transferAssignments).find((v) => v?.trim())?.trim() ?? '';
-  /** Fallback for kalıcı oda ataması (gerçek danışman anahtarı). */
+  /** Fallback for kalıcı oda ataması (branch portfolio code or legacy id). */
   const defaultPermanentAdvisor =
-    Object.values(permanentAssignments).find((v) => v?.trim())?.trim() ?? (allAdvisorKeys[0] ?? '');
+    Object.values(permanentAssignments).find((v) => v?.trim())?.trim() ??
+    (parsedTransferAdvisorRefs[0]?.code ?? '');
 
   const fetchTransferInstance = useCallback(async (instanceId: string) => {
     setTransferLoading(true);
     try {
       const res = await getInstance('rezervation-transfer', instanceId);
-      if (res.ok && res.data) {
-        const inst = res.data as VnextInstance;
+      let inst: VnextInstance | null =
+        res.ok && res.data ? (res.data as VnextInstance) : null;
+
+      // Self-heal: if the pinned instance is faulted (e.g. UI got stuck on a stale
+      // test record because listInstances returned oldest-first), try to re-resolve
+      // to the latest active transfer for this advisor before showing the user.
+      if (inst && (inst.metadata?.status as string) === 'F') {
+        const listRes = await listInstances('rezervation-transfer', { pageSize: 50 });
+        if (listRes.ok && listRes.data) {
+          const items = ((listRes.data as ApiData<VnextInstance>)?.items ?? []) as VnextInstance[];
+          const better = pickRelevantTransfer(items, ADVISOR_ID);
+          if (better?.id && better.id !== instanceId) {
+            const refreshed = await getInstance('rezervation-transfer', better.id);
+            if (refreshed.ok && refreshed.data) {
+              inst = refreshed.data as VnextInstance;
+            }
+          }
+        }
+      }
+
+      if (inst) {
         setTransferInstance(inst);
         const enriched = (inst.attributes?.enrichedRezervations ?? inst.attributes?.enrichedReservations ?? []) as Array<{ key: string }>;
         const initial: Record<string, string> = {};
@@ -164,7 +261,7 @@ export function Absence() {
     } finally {
       setTransferLoading(false);
     }
-  }, []);
+  }, [ADVISOR_ID]);
 
   const fetchWorkingHours = useCallback(async () => {
     setWorkingHoursLoading(true);
@@ -290,7 +387,10 @@ export function Absence() {
         if (listRes.ok && listRes.data) {
           const listData = listRes.data as ApiData<VnextInstance>;
           const transfers = (listData?.items ?? []) as VnextInstance[];
-          found = transfers.find((t) => t.key === expectedKey) ?? transfers[0] ?? null;
+          // Avoid `transfers[0]` fallback: the runtime returns instances oldest-first
+          // by default, so blindly taking [0] pins the UI to a stale/faulted record.
+          // Prefer exact-key match, then most recent active (`A`) instance for the user.
+          found = pickRelevantTransfer(transfers, ADVISOR_ID, expectedKey);
           if (found?.metadata?.currentState === 'awaiting-assignment') break;
           const enr = found?.attributes?.enrichedRezervations ?? found?.attributes?.enrichedReservations;
           if (Array.isArray(enr) && enr.length > 0) break;
@@ -387,7 +487,10 @@ export function Absence() {
         if (listRes.ok && listRes.data) {
           const listData = listRes.data as ApiData<VnextInstance>;
           const transfers = (listData?.items ?? []) as VnextInstance[];
-          found = transfers.find((t) => t.key === expectedKey) ?? transfers[0] ?? null;
+          // Avoid `transfers[0]` fallback: the runtime returns instances oldest-first
+          // by default, so blindly taking [0] pins the UI to a stale/faulted record.
+          // Prefer exact-key match, then most recent active (`A`) instance for the user.
+          found = pickRelevantTransfer(transfers, ADVISOR_ID, expectedKey);
           if (found?.metadata?.currentState === 'awaiting-assignment') break;
           const enr = found?.attributes?.enrichedRezervations ?? found?.attributes?.enrichedReservations;
           if (Array.isArray(enr) && enr.length > 0) break;
@@ -530,7 +633,7 @@ export function Absence() {
     startDateTime?: string;
     endDateTime?: string;
     user?: unknown;
-    availableAdvisors?: string[];
+    availableAdvisors?: unknown[];
   }>;
   const permRooms = (transferInstance?.attributes?.permanentChatRooms ?? []) as Array<{
     chatRoomKey?: string;
@@ -542,11 +645,24 @@ export function Absence() {
   }>;
   const transferType = (transferInstance?.attributes?.transferType as string) ?? '';
 
-  const fromAllAdvisorAttrs = (transferInstance?.attributes?.allAdvisorKeys as string[]) ?? [];
+  const codesFromEnrichedUnique = [
+    ...new Set(enriched.flatMap((r) => (r.availableAdvisors ?? []).map(availableEntryToCode).filter(Boolean))),
+  ];
   const baseAdvisorKeysList =
-    fromAllAdvisorAttrs.length > 0
-      ? fromAllAdvisorAttrs
-      : [...new Set(enriched.flatMap((r) => r.availableAdvisors ?? []))];
+    advisorCodesFromRefs(parsedTransferAdvisorRefs).length > 0
+      ? advisorCodesFromRefs(parsedTransferAdvisorRefs)
+      : codesFromEnrichedUnique;
+
+  const advisorRefByCode = new Map<string, BranchAdvisorRef>();
+  parsedTransferAdvisorRefs.forEach((r) => advisorRefByCode.set(r.code, r));
+  enriched.forEach((row) => {
+    (row.availableAdvisors ?? []).forEach((x) => {
+      const code = availableEntryToCode(x);
+      if (!code) return;
+      if (x && typeof x === 'object' && 'code' in x) advisorRefByCode.set(code, x as BranchAdvisorRef);
+      else if (!advisorRefByCode.has(code)) advisorRefByCode.set(code, { code, fullName: '', imageUrl: '' });
+    });
+  });
 
   const currentStep =
     state === 'awaiting-assignment'
@@ -758,7 +874,7 @@ export function Absence() {
                                     <td>{userName(r.user)}</td>
                                     <td>
                                       <span className="text-muted text-sm">
-                                        {(r.availableAdvisors ?? []).join(', ') || '—'}
+                                        {formatAvailableAdvisorsList(r.availableAdvisors as unknown[] | undefined) || '—'}
                                       </span>
                                     </td>
                                   </tr>
@@ -856,7 +972,9 @@ export function Absence() {
                                     <td>{formatDate(r.startDateTime)} {formatTime(r.startDateTime)}</td>
                                     <td>{userName(r.user)}</td>
                                     <td>
-                                      <span className="text-muted text-sm">{(r.availableAdvisors ?? []).join(', ') || '—'}</span>
+                                      <span className="text-muted text-sm">
+                                        {formatAvailableAdvisorsList(r.availableAdvisors as unknown[] | undefined) || '—'}
+                                      </span>
                                     </td>
                                     <td>
                                       <input
@@ -1005,7 +1123,9 @@ export function Absence() {
                               >
                                 <option value="">— Seçilenleri ata —</option>
                                 {baseAdvisorKeysList.map((adv) => (
-                                  <option key={adv} value={adv}>{adv}</option>
+                                  <option key={adv} value={adv}>
+                                    {advisorOptionLabel(adv, advisorRefByCode)}
+                                  </option>
                                 ))}
                               </select>
                               <button
@@ -1046,7 +1166,7 @@ export function Absence() {
                                 <tbody>
                                   {permRooms.map((r) => {
                                     const k = r.chatRoomKey ?? r.key ?? r.instanceKey ?? '?';
-                                    const advisorOptions = getFilteredAdvisorKeysForRoom(baseAdvisorKeysList, r);
+                                    const advisorOptions = getFilteredAdvisorCodesForRoom(baseAdvisorKeysList, r);
                                     return (
                                       <tr key={k}>
                                         <td>
@@ -1072,7 +1192,9 @@ export function Absence() {
                                           >
                                             <option value="">— Seçin —</option>
                                             {advisorOptions.map((adv) => (
-                                              <option key={adv} value={adv}>{adv}</option>
+                                              <option key={adv} value={adv}>
+                                                {advisorOptionLabel(adv, advisorRefByCode)}
+                                              </option>
                                             ))}
                                           </select>
                                         </td>
@@ -1311,7 +1433,7 @@ export function Absence() {
                           <tbody>
                             {permRooms.map((r) => {
                               const k = r.chatRoomKey ?? r.key ?? r.instanceKey ?? '?';
-                              const advisorOptions = getFilteredAdvisorKeysForRoom(baseAdvisorKeysList, r);
+                              const advisorOptions = getFilteredAdvisorCodesForRoom(baseAdvisorKeysList, r);
                               return (
                                 <tr key={k}>
                                   <td className="font-mono text-sm">{k}</td>
@@ -1330,7 +1452,9 @@ export function Absence() {
                                     >
                                       <option value="">— Seçin —</option>
                                       {advisorOptions.map((adv) => (
-                                        <option key={adv} value={adv}>{adv}</option>
+                                        <option key={adv} value={adv}>
+                                          {advisorOptionLabel(adv, advisorRefByCode)}
+                                        </option>
                                       ))}
                                     </select>
                                   </td>

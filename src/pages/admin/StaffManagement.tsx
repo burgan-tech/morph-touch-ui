@@ -8,7 +8,7 @@ import {
   Pencil,
   Trash2,
 } from 'lucide-react';
-import { listInstances, startInstance, runTransition, getAbsenceEntries } from '../../lib/api';
+import { listInstances, startInstance, runTransition, getAbsenceEntries, getAdvisorOnLeave, syncAdvisorPresence } from '../../lib/api';
 import { cn } from '../../lib/utils';
 import { DAY_LABELS } from '../../lib/constants';
 import { Badge, Card, CardHeader, CardBody, EmptyState, Modal, toast } from '../../components/ui';
@@ -104,6 +104,8 @@ export function StaffManagement() {
   const [editForm, setEditForm] = useState({ registryNumber: '', role: '' });
   const [editLoading, setEditLoading] = useState(false);
   const [whMap, setWhMap] = useState<Record<string, Schedule>>({});
+  const [onLeaveMap, setOnLeaveMap] = useState<Record<string, boolean>>({});
+  const [reconcileLoading, setReconcileLoading] = useState<string | null>(null);
 
   const fetchWorkingHours = useCallback(async () => {
     try {
@@ -165,6 +167,60 @@ export function StaffManagement() {
     fetchStaff();
     fetchWorkingHours();
   }, [fetchStaff, fetchWorkingHours]);
+
+  // After staff list loads, fetch each advisor's on-leave status.
+  // We use the lightweight get-advisor-on-leave function (single absence-entry query)
+  // rather than the composite getAdvisorPresence so we avoid hammering Matrix
+  // for every row in the table.
+  useEffect(() => {
+    if (staff.length === 0) return;
+    let cancelled = false;
+    (async () => {
+      const entries = await Promise.all(
+        staff.map(async (s) => {
+          const advisorKey = advisorInstanceKey(
+            (s.attributes?.advisorId as string) ?? s.key ?? ''
+          );
+          if (!advisorKey) return [s.key, false] as const;
+          try {
+            const res = await getAdvisorOnLeave(advisorKey);
+            const data = res.data as { getAdvisorOnLeave?: { onLeave?: boolean }; onLeave?: boolean } | null;
+            const onLeave = Boolean(data?.getAdvisorOnLeave?.onLeave ?? data?.onLeave ?? false);
+            return [s.key, onLeave] as const;
+          } catch {
+            return [s.key, false] as const;
+          }
+        })
+      );
+      if (cancelled) return;
+      setOnLeaveMap(Object.fromEntries(entries));
+    })();
+    return () => { cancelled = true; };
+  }, [staff]);
+
+  const handleReconcilePresence = async (s: VnextInstance) => {
+    const advisorKey = advisorInstanceKey((s.attributes?.advisorId as string) ?? s.key ?? '');
+    if (!advisorKey) return;
+    setReconcileLoading(s.key);
+    try {
+      const isOnLeave = onLeaveMap[s.key] === true;
+      const res = await syncAdvisorPresence(
+        advisorKey,
+        isOnLeave ? 'unavailable' : 'online',
+        isOnLeave ? 'İzinli' : '',
+        'reconcile'
+      );
+      if (res.ok) {
+        toast('Durum eşitlendi', 'success');
+      } else {
+        toast('Durum eşitlenemedi', 'error');
+      }
+    } catch (e) {
+      toast(String(e), 'error');
+    } finally {
+      setReconcileLoading(null);
+    }
+  };
 
   const filteredStaff = staff.filter((s) => {
     if (roleFilter && staffRole(s) !== roleFilter) return false;
@@ -387,6 +443,7 @@ export function StaffManagement() {
                   <tbody>
                     {filteredStaff.map((s) => {
                       const state = s.metadata?.currentState ?? 'draft';
+                      const onLeave = onLeaveMap[s.key] === true;
                       return (
                         <tr key={s.key}>
                           <td>
@@ -400,7 +457,25 @@ export function StaffManagement() {
                           </td>
                           <td>{staffRole(s)}</td>
                           <td>
-                            <Badge state={state} />
+                            <div className="flex items-center gap-2">
+                              <Badge state={state} />
+                              {onLeave && (
+                                <span
+                                  className="advisor-card-state-on-leave"
+                                  style={{
+                                    padding: '2px 8px',
+                                    borderRadius: 12,
+                                    background: '#fef3c7',
+                                    color: '#92400e',
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                  }}
+                                  title="Aktif kişisel izin var"
+                                >
+                                  İzinli
+                                </span>
+                              )}
+                            </div>
                           </td>
                           <td>
                             <div className="flex gap-2">
@@ -421,6 +496,19 @@ export function StaffManagement() {
                                   >
                                     <Pencil size={14} />
                                     Düzenle
+                                  </button>
+                                  <button
+                                    className="btn btn-secondary btn-sm"
+                                    onClick={() => handleReconcilePresence(s)}
+                                    disabled={reconcileLoading === s.key}
+                                    title="Matrix presence durumunu yeniden eşitle"
+                                  >
+                                    {reconcileLoading === s.key ? (
+                                      <RefreshCw size={14} className="animate-spin" />
+                                    ) : (
+                                      <RefreshCw size={14} />
+                                    )}
+                                    Eşitle
                                   </button>
                                   <button
                                     className="btn btn-danger btn-sm"

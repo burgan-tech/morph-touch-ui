@@ -13,16 +13,30 @@ interface AdvisorItem {
   state: string;
 }
 
-const CUSTOMERS: { customerId: string; segment: CustomerSegment; label: string }[] = [
+const CUSTOMERS: {
+  customerId: string;
+  segment: CustomerSegment;
+  label: string;
+  // Optional explicit advisor assignment. Falls back to user{num} → pm{num}/ia{num}
+  // when omitted (see customer Dashboard).
+  pmKey?: string;
+  iaKey?: string;
+}[] = [
   { customerId: 'user001', segment: 'Private', label: 'Müşteri 1' },
   { customerId: 'user002', segment: 'Private Plus', label: 'Müşteri 2' },
   { customerId: 'user003', segment: 'Private Plus', label: 'Müşteri 3' },
+  { customerId: 'user004', segment: 'Private Plus', label: 'Müşteri 4', pmKey: 'pm003', iaKey: 'ia002' },
 ];
 
 interface RoleSelectProps {
   onSelect: (role: Role) => void;
   onAdvisorSelect: (id: string, type: AdvisorType, name: string) => void;
-  onCustomerSelect?: (customerId: string, segment: CustomerSegment) => void;
+  onCustomerSelect?: (
+    customerId: string,
+    segment: CustomerSegment,
+    pmKey?: string,
+    iaKey?: string,
+  ) => void;
 }
 
 const roles: { role: Role; label: string; desc: string; icon: React.ElementType }[] = [
@@ -58,6 +72,7 @@ export function RoleSelect({ onSelect, onAdvisorSelect, onCustomerSelect }: Role
   const [advisors, setAdvisors] = useState<AdvisorItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [customerIds, setCustomerIds] = useState<string[]>(() => CUSTOMERS.map((c) => c.customerId));
 
   const fetchAdvisors = async () => {
     setLoading(true);
@@ -108,8 +123,9 @@ export function RoleSelect({ onSelect, onAdvisorSelect, onCustomerSelect }: Role
     }
   };
 
-  const handleCustomerClick = (c: (typeof CUSTOMERS)[number]) => {
-    onCustomerSelect?.(c.customerId, c.segment);
+  const handleCustomerClick = (c: (typeof CUSTOMERS)[number], customerId: string) => {
+    const trimmed = customerId.trim() || c.customerId;
+    onCustomerSelect?.(trimmed, c.segment, c.pmKey, c.iaKey);
     onSelect('customer');
   };
 
@@ -125,16 +141,40 @@ export function RoleSelect({ onSelect, onAdvisorSelect, onCustomerSelect }: Role
           <h1 className="role-select-title">Wealth App</h1>
           <p className="role-select-subtitle">Müşteri hesabınızı seçin</p>
           <div className="advisor-list">
-            {CUSTOMERS.map((c) => (
-              <button key={c.customerId} className="advisor-card" onClick={() => handleCustomerClick(c)}>
+            {CUSTOMERS.map((c, idx) => (
+              <div key={c.customerId} className="advisor-card">
                 <div className="advisor-card-icon">
                   <User size={24} />
                 </div>
                 <div className="advisor-card-info">
                   <span className="advisor-card-name">{c.label}</span>
-                  <span className="advisor-card-meta">{c.customerId} &middot; {c.segment}</span>
+                  <span className="advisor-card-meta" style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                    <input
+                      type="text"
+                      className="role-select-input"
+                      value={customerIds[idx]}
+                      placeholder={c.customerId}
+                      onChange={(e) =>
+                        setCustomerIds((prev) => {
+                          const next = [...prev];
+                          next[idx] = e.target.value;
+                          return next;
+                        })
+                      }
+                      aria-label={`${c.label} müşteri kimliği`}
+                    />
+                    <span>&middot; {c.segment}</span>
+                  </span>
                 </div>
-              </button>
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  style={{ flexShrink: 0 }}
+                  onClick={() => handleCustomerClick(c, customerIds[idx])}
+                >
+                  Giriş
+                </button>
+              </div>
             ))}
           </div>
           <button className="btn btn-secondary" style={{ marginTop: 20 }} onClick={() => setStep('role')}>

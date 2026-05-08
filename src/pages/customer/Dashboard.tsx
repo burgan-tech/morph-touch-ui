@@ -18,10 +18,17 @@ import {
   getChatRooms,
   getRoomMessages,
   getAvailableSlots,
+  getAdvisorPresence,
   startInstance,
   runTransition,
   getInstance,
 } from '../../lib/api';
+
+interface AdvisorPresence {
+  onLeave: boolean;
+  presence: 'online' | 'busy' | 'away' | 'offline';
+  statusMsg: string;
+}
 import { formatDateTime, formatTime, formatDate, cn, toUtcIsoFromDateAndTime } from '../../lib/utils';
 import { useCustomerContext } from '../../contexts/CustomerContext';
 import { Card, CardHeader, CardBody, EmptyState, Modal, toast } from '../../components/ui';
@@ -82,11 +89,21 @@ function extractReservations(res: { ok: boolean; data?: unknown }): ReservationI
 
 function extractChatRooms(res: { ok: boolean; data?: unknown }): ChatRoomInstance[] {
   if (!res.ok || !res.data) return [];
-  const d = res.data as { items?: Array<{ getChatRooms?: { rooms?: ChatRoomInstance[] } }> };
+  const d = res.data as {
+    items?: ChatRoomInstance[] | Array<{ getChatRooms?: { rooms?: ChatRoomInstance[] } }>;
+    getChatRooms?: { rooms?: ChatRoomInstance[]; items?: ChatRoomInstance[] };
+    rooms?: ChatRoomInstance[];
+  };
+  const direct = (d?.rooms ?? d?.getChatRooms?.rooms ?? d?.getChatRooms?.items) as
+    | ChatRoomInstance[]
+    | undefined;
+  if (Array.isArray(direct)) return direct;
   const items = d?.items;
   if (!Array.isArray(items) || items.length === 0) return [];
-  const rooms = items[0]?.getChatRooms?.rooms;
-  return Array.isArray(rooms) ? rooms : [];
+  const first = items[0] as { getChatRooms?: { rooms?: ChatRoomInstance[] } } & ChatRoomInstance;
+  const nested = first?.getChatRooms?.rooms;
+  if (Array.isArray(nested)) return nested;
+  return items as ChatRoomInstance[];
 }
 
 function extractSlotItems(res: { ok: boolean; data?: unknown }): { start: string; end: string }[] {
@@ -195,11 +212,14 @@ function delay(ms: number): Promise<void> {
 }
 
 export function Dashboard() {
-  const { customerId, segment } = useCustomerContext();
+  const { customerId, segment, pmKey: pmKeyOverride, iaKey: iaKeyOverride } = useCustomerContext();
   const navigate = useNavigate();
   const num = customerId ? customerNumber(customerId) : '001';
-  const pmKey = `pm${num}`;
-  const iaKey = `ia${num}`;
+  // Prefer explicit advisor assignments coming from the customer selection
+  // (RoleSelect → CustomerContext). Fallback to the legacy 1-1 convention
+  // where user{NNN} → pm{NNN}/ia{NNN}.
+  const pmKey = pmKeyOverride && pmKeyOverride.length > 0 ? pmKeyOverride : `pm${num}`;
+  const iaKey = iaKeyOverride && iaKeyOverride.length > 0 ? iaKeyOverride : `ia${num}`;
 
   const [reservations, setReservations] = useState<ReservationInstance[]>([]);
   const [rooms, setRooms] = useState<ChatRoomInstance[]>([]);
@@ -238,6 +258,38 @@ export function Dashboard() {
   const [confirmReservationPolling, setConfirmReservationPolling] = useState(false);
   const [confirmReservationTransitioning, setConfirmReservationTransitioning] = useState(false);
   const [reservationSuccessModalOpen, setReservationSuccessModalOpen] = useState(false);
+  const [advisorPresence, setAdvisorPresence] = useState<Record<string, AdvisorPresence>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const advisorKeys = [pmKey, iaKey].filter((k): k is string => typeof k === 'string' && k.length > 0);
+    if (advisorKeys.length === 0) return;
+
+    const refresh = async () => {
+      const results = await Promise.all(
+        advisorKeys.map(async (k) => {
+          try {
+            const res = await getAdvisorPresence(k);
+            return [k, { onLeave: res.onLeave, presence: res.presence, statusMsg: res.statusMsg }] as const;
+          } catch {
+            return [k, { onLeave: false, presence: 'offline' as const, statusMsg: '' }] as const;
+          }
+        })
+      );
+      if (cancelled) return;
+      setAdvisorPresence(Object.fromEntries(results));
+    };
+
+    refresh();
+    // Refresh periodically so the badge flips when leave windows open/close
+    // server-side via the absence-entry timer transitions.
+    const interval = window.setInterval(refresh, 30_000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [pmKey, iaKey]);
 
   const fetchReservations = useCallback(async () => {
     if (!customerId) return;
@@ -754,17 +806,38 @@ export function Dashboard() {
             <div className="flex gap-4" style={{ flexWrap: 'wrap' }}>
               {advisors.map(({ key, type, label, Icon }) => {
                 const revs = reservationsByAdvisor(key);
+                const presence = advisorPresence[key];
+                const isOnLeave = presence?.onLeave === true;
+                const onLeaveTooltip = 'Şu an izinli';
                 return (
                   <div key={key} className="card p-4" style={{ minWidth: 280, maxWidth: 360 }}>
                     <div className="flex items-center gap-2 mb-3">
                       <Icon size={24} />
                       <span className="font-medium">{label}</span>
                       <span className="text-muted text-sm">{key.split('.').pop()}</span>
+                      {isOnLeave && (
+                        <span
+                          className="advisor-card-state-on-leave"
+                          style={{
+                            marginLeft: 'auto',
+                            padding: '2px 8px',
+                            borderRadius: 12,
+                            background: '#fef3c7',
+                            color: '#92400e',
+                            fontSize: 12,
+                            fontWeight: 600,
+                          }}
+                          title={onLeaveTooltip}
+                        >
+                          İzinli
+                        </span>
+                      )}
                     </div>
                     <div className="flex flex-col gap-2 mb-3">
                       <button
                         className="btn btn-primary btn-sm"
-                        disabled={messageLoading === key}
+                        disabled={messageLoading === key || isOnLeave}
+                        title={isOnLeave ? onLeaveTooltip : undefined}
                         onClick={() => handleMessage(key, type)}
                       >
                         {messageLoading === key ? <RefreshCw size={14} className="animate-spin" /> : <MessageSquare size={14} />}
@@ -773,7 +846,8 @@ export function Dashboard() {
                       {isPrivatePlus && (
                         <button
                           className="btn btn-secondary btn-sm"
-                          disabled={revs.length >= 2}
+                          disabled={revs.length >= 2 || isOnLeave}
+                          title={isOnLeave ? onLeaveTooltip : undefined}
                           onClick={() => openBookModal(key, type)}
                         >
                           <CalendarDays size={14} />
