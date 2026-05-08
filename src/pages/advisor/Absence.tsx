@@ -32,7 +32,7 @@ interface VnextInstance {
   key: string;
   id?: string;
   attributes: Record<string, unknown>;
-  metadata?: { currentState?: string; createdAt?: string; updatedAt?: string };
+  metadata?: { currentState?: string; createdAt?: string; updatedAt?: string; status?: string };
 }
 
 interface ApiData<T> {
