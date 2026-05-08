@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import type { Role } from './lib/constants';
 import { useRole } from './hooks/useRole';
 import { AdvisorProvider, useAdvisorContext } from './contexts/AdvisorContext';
 import { CustomerProvider, useCustomerContext } from './contexts/CustomerContext';
