@@ -61,8 +61,12 @@ export function startInstance(
   });
 }
 
-export function getInstance(workflow: string, instanceId: string) {
-  return request(`${BASE_URL}/workflows/${workflow}/instances/${instanceId}`);
+export function getInstance(
+  workflow: string,
+  instanceId: string,
+  headers?: Record<string, string>
+) {
+  return request(`${BASE_URL}/workflows/${workflow}/instances/${instanceId}`, headers ? { headers } : undefined);
 }
 
 export function listInstances(

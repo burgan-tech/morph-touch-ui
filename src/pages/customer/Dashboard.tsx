@@ -244,11 +244,6 @@ export function Dashboard() {
   const [roomMessages, setRoomMessages] = useState<RoomMessage[]>([]);
   const [roomMessagesLoading, setRoomMessagesLoading] = useState(false);
   const [startMeetLoading, setStartMeetLoading] = useState<string | null>(null);
-  const [videoCallModal, setVideoCallModal] = useState<{
-    reservation: ReservationInstance;
-    status: 'starting' | 'waiting' | 'ready';
-    videoUrl: string | null;
-  } | null>(null);
   const [confirmReservation, setConfirmReservation] = useState<{ instanceId: string } | null>(null);
   const [confirmReservationSnapshot, setConfirmReservationSnapshot] = useState<{
     advisor: string;
@@ -322,37 +317,6 @@ export function Dashboard() {
     fetchReservations();
     fetchRooms();
   }, [fetchReservations, fetchRooms]);
-
-  useEffect(() => {
-    if (!videoCallModal || videoCallModal.status !== 'waiting' || !customerId) return;
-    const r = videoCallModal.reservation;
-    const id = r.id ?? r.key;
-    let cancelled = false;
-
-    const poll = async () => {
-      try {
-        const res = await getInstance('rezervation', id);
-        if (cancelled) return;
-        const data = res.data as { attributes?: { videoCallUrls?: Record<string, string>[] }; videoCallUrls?: Record<string, string>[] } | null;
-        const urls = data?.attributes?.videoCallUrls ?? data?.videoCallUrls;
-        if (urls && Array.isArray(urls) && urls.length > 0) {
-          const myEntry = urls.find((u) => u && customerId in u);
-          if (myEntry && myEntry[customerId]) {
-            setVideoCallModal((prev) => prev ? { ...prev, status: 'ready', videoUrl: myEntry[customerId] } : null);
-            return;
-          }
-        }
-      } catch {
-        /* retry */
-      }
-      if (!cancelled) setTimeout(poll, 3000);
-    };
-    const timer = setTimeout(poll, 2000);
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [videoCallModal?.status, videoCallModal?.reservation.key, customerId]);
 
   useEffect(() => {
     const instanceId = confirmReservation?.instanceId;
@@ -509,14 +473,14 @@ export function Dashboard() {
   });
 
   const now = Date.now();
-  const fifteenMin = 15 * 60 * 1000;
+  const thirtyMin = 30 * 60 * 1000;
   const upcomingSoon = activeReservations.filter((r) => {
     const start = r.attributes?.startDateTime;
     const end = r.attributes?.endDateTime;
     if (!start || !end) return false;
     const startTs = new Date(start).getTime();
     const endTs = new Date(end).getTime();
-    return now >= startTs - fifteenMin && now <= endTs;
+    return now >= startTs - thirtyMin && now <= endTs;
   });
 
   const reservationsByAdvisor = (advisorKey: string): ReservationInstance[] =>
@@ -548,7 +512,6 @@ export function Dashboard() {
   const handleStartMeet = async (r: ReservationInstance) => {
     if (!r.key) return;
     setStartMeetLoading(r.key);
-    setVideoCallModal({ reservation: r, status: 'starting', videoUrl: null });
     try {
       const res = await startInstance('rezervation-start', {
         key: `rezervation-start-${Date.now()}`,
@@ -556,16 +519,15 @@ export function Dashboard() {
         attributes: { randevuKey: r.key, participantType: 'customer' },
       });
       if (res.ok) {
-        setVideoCallModal((prev) => prev ? { ...prev, status: 'waiting' } : null);
         fetchReservations();
+        const rezervationId = encodeURIComponent(r.id ?? r.key);
+        navigate(`/customer/video-call?rezervation=${rezervationId}`);
       } else {
         const err = (res.data as Record<string, unknown>)?.error ?? 'Görüşme başlatılamadı';
         toast(String(err), 'error');
-        setVideoCallModal(null);
       }
     } catch (e) {
       toast(String(e), 'error');
-      setVideoCallModal(null);
     } finally {
       setStartMeetLoading(null);
     }
@@ -931,7 +893,7 @@ export function Dashboard() {
                     <p>Yükleniyor...</p>
                   </div>
                 ) : upcomingSoon.length === 0 ? (
-                  <EmptyState message="15 dakika içinde başlayacak randevu yok" icon={<Clock size={40} strokeWidth={1.5} />} />
+                  <EmptyState message="30 dakika içinde başlayacak randevu yok" icon={<Clock size={40} strokeWidth={1.5} />} />
                 ) : (
                   <ul className="space-y-2">
                     {upcomingSoon.map((r, idx) => (
@@ -1270,50 +1232,6 @@ export function Dashboard() {
         )}
       </Modal>
 
-      {/* Video call modal */}
-      <Modal
-        open={!!videoCallModal}
-        onClose={() => setVideoCallModal(null)}
-        title="Görüntülü Görüşme"
-        footer={
-          videoCallModal?.status === 'ready' ? (
-            <>
-              <button className="btn btn-secondary" onClick={() => setVideoCallModal(null)}>Kapat</button>
-              <a href={videoCallModal.videoUrl!} target="_blank" rel="noreferrer" className="btn btn-primary">
-                <Video size={16} /> Görüşmeye Katıl
-              </a>
-            </>
-          ) : (
-            <button className="btn btn-secondary" onClick={() => setVideoCallModal(null)}>İptal</button>
-          )
-        }
-      >
-        {videoCallModal?.status === 'starting' && (
-          <div style={{ textAlign: 'center', padding: 32 }}>
-            <RefreshCw size={32} className="animate-spin" style={{ margin: '0 auto 16px', display: 'block' }} />
-            <p>Bağlantınız kuruluyor...</p>
-          </div>
-        )}
-        {videoCallModal?.status === 'waiting' && (
-          <div style={{ textAlign: 'center', padding: 32 }}>
-            <Video size={48} strokeWidth={1.5} style={{ margin: '0 auto 16px', display: 'block', color: 'var(--color-primary)' }} />
-            <p style={{ fontWeight: 600, fontSize: 16, marginBottom: 8 }}>
-              Danışmanınıza bildirim gönderildi
-            </p>
-            <p className="text-muted">
-              Onay verdiğinde görüntülü görüşmeniz başlayacaktır.
-            </p>
-            <RefreshCw size={20} className="animate-spin" style={{ margin: '16px auto 0', display: 'block', color: 'var(--color-muted)' }} />
-          </div>
-        )}
-        {videoCallModal?.status === 'ready' && (
-          <div style={{ textAlign: 'center', padding: 32 }}>
-            <Video size={48} strokeWidth={1.5} style={{ margin: '0 auto 16px', display: 'block', color: 'var(--color-success, #16a34a)' }} />
-            <p style={{ fontWeight: 600, fontSize: 16 }}>Görüntülü görüşme hazır!</p>
-            <p className="text-muted">Görüşmeye katılmak için aşağıdaki butonu kullanın.</p>
-          </div>
-        )}
-      </Modal>
     </div>
   );
 }

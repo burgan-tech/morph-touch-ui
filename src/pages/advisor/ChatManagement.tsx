@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, Fragment } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Star,
   Send,
@@ -7,6 +8,7 @@ import {
   UserPlus,
   Users,
   MessageSquare,
+  Video,
 } from 'lucide-react';
 import { getChatRooms, getRoomMessages, sendRoomMessage, getMatrixSync, runTransition, listInstances } from '../../lib/api';
 import { formatTime, formatDate, cn } from '../../lib/utils';
@@ -33,6 +35,9 @@ interface ChatRoomInstance {
     advisorId?: string;
     advisorType?: string;
     roomType?: string;
+    /** Randevu sohbetinde görüntülü görüşme için workflow instance anahtarı */
+    randevuKey?: string;
+    rezervationKey?: string;
     chatIntegration?: { matrix?: { roomId?: string } };
     members?: ChatRoomMember[];
   };
@@ -66,6 +71,8 @@ function normalizeRoom(raw: Record<string, unknown>): ChatRoomInstance {
       advisorId: (raw.advisorId as string) ?? (attrs.advisorId as string),
       advisorType: (raw.advisorType as string) ?? (attrs.advisorType as string),
       roomType: (raw.roomType as string) ?? (attrs.roomType as string),
+      randevuKey: typeof attrs.randevuKey === 'string' ? attrs.randevuKey : undefined,
+      rezervationKey: typeof attrs.rezervationKey === 'string' ? attrs.rezervationKey : undefined,
       chatIntegration: (raw.roomId as string)
         ? { matrix: { roomId: raw.roomId as string } }
         : (attrs.chatIntegration as { matrix?: { roomId?: string } } | undefined),
@@ -118,6 +125,19 @@ function extractMessages(res: { ok: boolean; data?: unknown }): ChatMessage[] {
 function getMatrixRoomId(room: ChatRoomInstance): string | null {
   const ci = room.attributes?.chatIntegration as { matrix?: { roomId?: string }; roomId?: string } | undefined;
   return ci?.matrix?.roomId ?? ci?.roomId ?? null;
+}
+
+/** `chat-room` randevu tipinde görüntülü görüşme sayfası için rezervasyon instance id. */
+function getRezervationIdForVideoCall(room: ChatRoomInstance): string | null {
+  const a = room.attributes;
+  const fromAttrs =
+    (typeof a?.randevuKey === 'string' && a.randevuKey.trim()) ||
+    (typeof a?.rezervationKey === 'string' && a.rezervationKey.trim()) ||
+    '';
+  if (fromAttrs) return fromAttrs;
+  if (a?.roomType === 'rezervation' && room.id && room.id.trim()) return room.id.trim();
+  if (a?.roomType === 'rezervation' && room.key && room.key.trim()) return room.key.trim();
+  return null;
 }
 
 interface SyncResponse {
@@ -233,6 +253,7 @@ function validateFile(file: File): string | null {
 
 export function ChatManagement() {
   const ADVISOR_ID = useAdvisorContext().advisorId!;
+  const navigate = useNavigate();
   const [rooms, setRooms] = useState<ChatRoomInstance[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<ChatRoomInstance | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -746,6 +767,21 @@ export function ChatManagement() {
                     <Users size={14} />
                     Katılımcılar
                   </button>
+                  {selectedRoom.attributes?.roomType === 'rezervation' &&
+                    getRezervationIdForVideoCall(selectedRoom) && (
+                      <button
+                        type="button"
+                        className="btn btn-primary btn-sm"
+                        title="Görüntülü görüşmeyi uygulama içinde aç"
+                        onClick={() => {
+                          const rid = getRezervationIdForVideoCall(selectedRoom);
+                          if (rid) navigate(`/advisor/video-call?rezervation=${encodeURIComponent(rid)}`);
+                        }}
+                      >
+                        <Video size={14} />
+                        Görüntülü görüşme
+                      </button>
+                    )}
                   {isPrimaryAdvisor && !isRoomDeactivated && (
                     <button
                       className="btn btn-secondary btn-sm"

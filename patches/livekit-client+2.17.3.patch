@@ -1,0 +1,44 @@
+diff --git a/node_modules/livekit-client/dist/livekit-client.esm.mjs b/node_modules/livekit-client/dist/livekit-client.esm.mjs
+index d5fb341..e7a92ca 100644
+--- a/node_modules/livekit-client/dist/livekit-client.esm.mjs
++++ b/node_modules/livekit-client/dist/livekit-client.esm.mjs
+@@ -15046,6 +15046,9 @@ class SignalClient {
+             if (redactedUrl.searchParams.has('access_token')) {
+               redactedUrl.searchParams.set('access_token', '<redacted>');
+             }
++            if (redactedUrl.searchParams.has('room_token')) {
++              redactedUrl.searchParams.set('room_token', '<redacted>');
++            }
+             this.log.debug("connecting to ".concat(redactedUrl), Object.assign({
+               reconnect: opts.reconnect,
+               reconnectReason: opts.reconnectReason
+@@ -15679,7 +15682,13 @@ function toProtoSessionDescription(rsd, id) {
+ function createConnectionParams(token, info, opts) {
+   var _a;
+   const params = new URLSearchParams();
+-  params.set('access_token', token);
++  var morph = typeof globalThis !== 'undefined' && globalThis.__morphTouchLiveKitMorphToken;
++  if (morph && typeof morph === 'string' && morph.length > 0) {
++    params.set('access_token', morph);
++    params.set('room_token', token);
++  } else {
++    params.set('access_token', token);
++  }
+   // opts
+   if (opts.reconnect) {
+     params.set('reconnect', '1');
+@@ -15722,7 +15731,13 @@ function createConnectionParams(token, info, opts) {
+ }
+ function createJoinRequestConnectionParams(token, info, opts) {
+   const params = new URLSearchParams();
+-  params.set('access_token', token);
++  var morph = typeof globalThis !== 'undefined' && globalThis.__morphTouchLiveKitMorphToken;
++  if (morph && typeof morph === 'string' && morph.length > 0) {
++    params.set('access_token', morph);
++    params.set('room_token', token);
++  } else {
++    params.set('access_token', token);
++  }
+   const joinRequest = new JoinRequest({
+     clientInfo: info,
+     connectionSettings: new ConnectionSettings({
