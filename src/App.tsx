@@ -7,10 +7,22 @@ import { AppLayout } from './components/layout/AppLayout';
 import { ToastContainer } from './components/ui';
 import { RoleSelect } from './pages/RoleSelect';
 
-import { Dashboard as AdvisorDashboard, VideoCalls, ChatManagement, Appointments as AdvisorAppointments, Absence, Help as AdvisorHelp } from './pages/advisor';
+import {
+  Dashboard as AdvisorDashboard,
+  VideoCalls,
+  VideoCall as AdvisorVideoCall,
+  ChatManagement,
+  Appointments as AdvisorAppointments,
+  Absence,
+  Help as AdvisorHelp,
+} from './pages/advisor';
 import { Dashboard as AdminDashboard, StaffManagement, Appointments as AdminAppointments, Communications, AbsenceManagement, Help as AdminHelp } from './pages/admin';
 import { Dashboard as AuditDashboard, VideoRecords, ChatRecords } from './pages/audit';
-import { Dashboard as CustomerDashboard, Chat as CustomerChat } from './pages/customer';
+import {
+  Dashboard as CustomerDashboard,
+  Chat as CustomerChat,
+  VideoCall as CustomerVideoCall,
+} from './pages/customer';
 
 function AppInner() {
   const { role, setRole, logout } = useRole();
@@ -49,6 +61,7 @@ function AppInner() {
           {/* Advisor routes */}
           <Route path="/advisor" element={<AdvisorDashboard />} />
           <Route path="/advisor/video-calls" element={<VideoCalls />} />
+          <Route path="/advisor/video-call" element={<AdvisorVideoCall />} />
           <Route path="/advisor/chat" element={<ChatManagement />} />
           <Route path="/advisor/appointments" element={<AdvisorAppointments />} />
           <Route path="/advisor/absence" element={<Absence />} />
@@ -70,6 +83,7 @@ function AppInner() {
           {/* Customer routes */}
           <Route path="/customer" element={<CustomerDashboard />} />
           <Route path="/customer/chat" element={<CustomerChat />} />
+          <Route path="/customer/video-call" element={<CustomerVideoCall />} />
 
           {/* Default redirect */}
           <Route path="*" element={<Navigate to={`/${role}`} replace />} />

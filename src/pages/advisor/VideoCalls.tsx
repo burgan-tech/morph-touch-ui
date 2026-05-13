@@ -11,7 +11,7 @@ import {
   Pause,
   Play,
 } from 'lucide-react';
-import { Track } from 'livekit-client';
+import { Track, type RoomConnectOptions } from 'livekit-client';
 import {
   LiveKitRoom,
   VideoTrack,
@@ -23,6 +23,7 @@ import {
 import '@livekit/components-styles';
 import { BackgroundBlur, supportsBackgroundProcessors } from '@livekit/track-processors';
 import { getReservations, callFunction } from '../../lib/api';
+import { getLiveKitConnectOptions } from '../../lib/livekitConfig';
 import { formatTime, cn } from '../../lib/utils';
 import { Badge, Card, CardHeader, CardBody, EmptyState, Modal, toast } from '../../components/ui';
 import { useAdvisorContext } from '../../contexts/AdvisorContext';
@@ -37,6 +38,7 @@ interface ReservationInstance {
     advisor?: string;
     startDateTime?: string;
     endDateTime?: string;
+    turnServers?: unknown[];
     webrtcIntegration?: { livekit?: { room?: string } };
     chatIntegration?: { matrix?: { roomId?: string } };
   };
@@ -208,11 +210,13 @@ function CustomerVideoArea() {
 function ActiveVideoCall({
   reservation,
   token,
+  connectOptions,
   onBack,
   onMinimize,
 }: {
   reservation: ReservationInstance;
   token: string;
+  connectOptions?: RoomConnectOptions;
   onBack: () => void;
   onMinimize: () => void;
 }) {
@@ -231,6 +235,7 @@ function ActiveVideoCall({
         connect={true}
         video={true}
         audio={true}
+        connectOptions={connectOptions}
         onDisconnected={handleDisconnect}
         onError={(err) => toast(err.message, 'error')}
         style={{ display: 'flex', flexDirection: 'column', height: '100%' }}
@@ -446,6 +451,7 @@ export function VideoCalls() {
           <ActiveVideoCall
             reservation={activeCall.reservation}
             token={activeCall.token}
+            connectOptions={getLiveKitConnectOptions(activeCall.reservation.attributes?.turnServers)}
             onBack={handleBack}
             onMinimize={handleMinimize}
           />
