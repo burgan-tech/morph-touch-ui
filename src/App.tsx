@@ -47,7 +47,9 @@ function AppInner() {
         <RoleSelect
           onSelect={handleRoleSelect}
           onAdvisorSelect={(id, type, name) => setAdvisor(id, type, name)}
-          onCustomerSelect={(id, segment, pmKey, iaKey) => setCustomer(id, segment, pmKey, iaKey)}
+          onCustomerSelect={(id, segment, pmKey, iaKey, name) =>
+            setCustomer(id, segment, pmKey, iaKey, name)
+          }
         />
         <ToastContainer />
       </>

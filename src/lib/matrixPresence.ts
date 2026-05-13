@@ -8,9 +8,28 @@ export type PresenceStatus = 'online' | 'busy' | 'away' | 'offline';
 
 const BASE = import.meta.env.VITE_MATRIX_APISIX_ORIGIN ?? '';
 
+/**
+ * Mirror the backend `EnsureMatrixLocalpart` helper used during Matrix
+ * registration/login (see workflows/src/*.csx and Functions/src/LoginForMatrix*).
+ * Synapse rejects mixed-case and numeric-leading localparts for regular users,
+ * so we lowercase and idempotently prefix with `u` when the first character is
+ * not a-z. Without this, `U000513` / `10928922766` produce MXIDs that don't
+ * match the user the access token (or APISIX `matrix-auth` plugin) was minted
+ * for and Synapse answers 403 M_FORBIDDEN on /presence and friends.
+ */
+function normalizeMatrixLocalpart(raw: string): string {
+  if (!raw) return raw;
+  const trimmed = raw.trim();
+  const stripped = trimmed.startsWith('@') ? trimmed.slice(1).split(':')[0] : trimmed;
+  const lower = stripped.toLowerCase();
+  if (!lower) return lower;
+  const first = lower.charCodeAt(0);
+  const isAlpha = first >= 97 && first <= 122;
+  return isAlpha ? lower : `u${lower}`;
+}
+
 function toMxid(advisorId: string, domain = 'localhost'): string {
-  const localPart = advisorId.startsWith('@') ? advisorId.slice(1).split(':')[0] : advisorId;
-  return `@${localPart}:${domain}`;
+  return `@${normalizeMatrixLocalpart(advisorId)}:${domain}`;
 }
 
 function toUiStatus(presence: string, statusMsg?: string): PresenceStatus {
@@ -48,7 +67,7 @@ export interface PresenceResponse {
 export async function getPresence(advisorId: string): Promise<{ ok: boolean; status?: PresenceStatus; error?: string }> {
   const mxid = toMxid(advisorId);
   const url = `${BASE}/_matrix/client/v3/presence/${encodeURIComponent(mxid)}/status`;
-  const xMatrixUser = advisorId.startsWith('@') ? advisorId.slice(1).split(':')[0] : advisorId;
+  const xMatrixUser = normalizeMatrixLocalpart(advisorId);
 
   try {
     const res = await fetch(url, {
@@ -76,7 +95,7 @@ export async function getPresence(advisorId: string): Promise<{ ok: boolean; sta
 export async function setPresence(advisorId: string, uiStatus: PresenceStatus): Promise<{ ok: boolean; error?: string }> {
   const mxid = toMxid(advisorId);
   const url = `${BASE}/_matrix/client/v3/presence/${encodeURIComponent(mxid)}/status`;
-  const xMatrixUser = advisorId.startsWith('@') ? advisorId.slice(1).split(':')[0] : advisorId;
+  const xMatrixUser = normalizeMatrixLocalpart(advisorId);
   const body = toMatrixPayload(uiStatus);
 
   try {

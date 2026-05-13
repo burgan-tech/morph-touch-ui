@@ -5,12 +5,15 @@ export type CustomerSegment = 'Private' | 'Private Plus';
 interface CustomerState {
   customerId: string | null;
   segment: CustomerSegment | null;
-  // Optional explicit PM/IA assignment. When omitted, the customer Dashboard
-  // falls back to the legacy convention of `pm{num}` / `ia{num}` derived from
-  // the customer id (user001 → pm001/ia001 …). Used for test customers whose
-  // advisors don't follow that 1-1 mapping (e.g. user004 → pm003/ia002).
+  // Optional explicit PM/IA assignment carried alongside the customer record
+  // (see `data/customers.ts`). The Dashboard surfaces these advisor sicils
+  // (e.g. U02917 / U000513) so chat rooms can be opened against the right
+  // PM/IA without relying on any implicit naming convention.
   pmKey: string | null;
   iaKey: string | null;
+  // Human-readable display name (e.g. "ABDURRAHMAN KIRANLI"). When present,
+  // surfaced in place of the TCKN/customerId in the Topbar.
+  customerName: string | null;
 }
 
 interface CustomerContextValue extends CustomerState {
@@ -19,6 +22,7 @@ interface CustomerContextValue extends CustomerState {
     segment: CustomerSegment,
     pmKey?: string,
     iaKey?: string,
+    customerName?: string,
   ) => void;
   clearCustomer: () => void;
 }
@@ -28,6 +32,7 @@ const KEYS = {
   segment: 'wealth-app-customer-segment',
   pmKey: 'wealth-app-customer-pm',
   iaKey: 'wealth-app-customer-ia',
+  name: 'wealth-app-customer-name',
 } as const;
 
 function loadFromStorage(): CustomerState {
@@ -36,11 +41,13 @@ function loadFromStorage(): CustomerState {
   const segment = rawSegment === 'Private' || rawSegment === 'Private Plus' ? rawSegment : null;
   const pmKey = localStorage.getItem(KEYS.pmKey);
   const iaKey = localStorage.getItem(KEYS.iaKey);
+  const customerName = localStorage.getItem(KEYS.name);
   return {
     customerId,
     segment,
     pmKey: pmKey && pmKey.length > 0 ? pmKey : null,
     iaKey: iaKey && iaKey.length > 0 ? iaKey : null,
+    customerName: customerName && customerName.length > 0 ? customerName : null,
   };
 }
 
@@ -50,18 +57,27 @@ export function CustomerProvider({ children }: { children: ReactNode }) {
   const [state, setState] = useState<CustomerState>(loadFromStorage);
 
   const setCustomer = useCallback(
-    (customerId: string, segment: CustomerSegment, pmKey?: string, iaKey?: string) => {
+    (
+      customerId: string,
+      segment: CustomerSegment,
+      pmKey?: string,
+      iaKey?: string,
+      customerName?: string,
+    ) => {
       localStorage.setItem(KEYS.id, customerId);
       localStorage.setItem(KEYS.segment, segment);
       if (pmKey) localStorage.setItem(KEYS.pmKey, pmKey);
       else localStorage.removeItem(KEYS.pmKey);
       if (iaKey) localStorage.setItem(KEYS.iaKey, iaKey);
       else localStorage.removeItem(KEYS.iaKey);
+      if (customerName) localStorage.setItem(KEYS.name, customerName);
+      else localStorage.removeItem(KEYS.name);
       setState({
         customerId,
         segment,
         pmKey: pmKey ?? null,
         iaKey: iaKey ?? null,
+        customerName: customerName ?? null,
       });
     },
     [],
@@ -72,7 +88,14 @@ export function CustomerProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem(KEYS.segment);
     localStorage.removeItem(KEYS.pmKey);
     localStorage.removeItem(KEYS.iaKey);
-    setState({ customerId: null, segment: null, pmKey: null, iaKey: null });
+    localStorage.removeItem(KEYS.name);
+    setState({
+      customerId: null,
+      segment: null,
+      pmKey: null,
+      iaKey: null,
+      customerName: null,
+    });
   }, []);
 
   return (

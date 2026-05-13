@@ -7,7 +7,7 @@ import { useCustomerContext } from '../../contexts/CustomerContext';
 import { setPresence } from '../../lib/matrixPresence';
 import type { PresenceStatus } from '../../lib/matrixPresence';
 import { getAdvisorPresence } from '../../lib/api';
-import { toast } from '../ui';
+import { toast } from '../../components/ui';
 
 interface TopbarProps {
   role: Role;
@@ -22,7 +22,7 @@ const ON_LEAVE_TOOLTIP = 'İzinlisiniz; durumunuz değiştirilemez.';
 
 export function Topbar({ role, collapsed, onToggle, onLogout }: TopbarProps) {
   const { advisorId, advisorName, advisorType } = useAdvisorContext();
-  const { customerId, segment } = useCustomerContext();
+  const { customerId, segment, customerName } = useCustomerContext();
   const [status, setStatus] = useState<PresenceStatus>('online');
   const [onLeave, setOnLeave] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
@@ -126,7 +126,7 @@ export function Topbar({ role, collapsed, onToggle, onLogout }: TopbarProps) {
           ) : role === 'customer' && customerId ? (
             <>
               <User size={18} />
-              <span className="topbar-advisor-name">{customerId}</span>
+              <span className="topbar-advisor-name">{customerName ?? customerId}</span>
               {segment && <span className="topbar-advisor-type">{segment}</span>}
             </>
           ) : (

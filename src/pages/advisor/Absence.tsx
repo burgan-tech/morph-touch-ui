@@ -20,6 +20,7 @@ import { STATE_LABELS, DAY_LABELS } from '../../lib/constants';
 import { Badge, EmptyState, toast } from '../../components/ui';
 import { useAdvisorContext, type AdvisorType } from '../../contexts/AdvisorContext';
 import { HISTORY_VISIBILITY_OPTIONS, type MatrixHistoryVisibility } from '../../lib/matrixChat';
+import { getCustomerName } from '../../data/customers';
 
 /** Workflow slug for rezervation-transfer / API (portfolio-manager | investment-advisor). */
 function advisorTypeToFlowSlug(t: AdvisorType | null): string | null {
@@ -55,6 +56,18 @@ function userName(ref: unknown): string {
   return '—';
 }
 
+/** Render a customer cell as TCKN on top + full name below (mock roster lookup). */
+function CustomerCell({ user }: { user: unknown }) {
+  const tckn = userName(user);
+  const name = tckn !== '—' ? getCustomerName(tckn) : undefined;
+  return (
+    <div className="flex flex-col" style={{ lineHeight: 1.25 }}>
+      <span className="font-medium">{tckn}</span>
+      {name && <span className="text-muted text-xs">{name}</span>}
+    </div>
+  );
+}
+
 /** Portfolio branch advisor row from transfer / portfolio-info (or legacy string key). */
 type BranchAdvisorRef = { code: string; fullName?: string; imageUrl?: string };
 
@@ -80,10 +93,6 @@ function parseBranchAdvisorRefList(raw: unknown): BranchAdvisorRef[] {
   return out;
 }
 
-function advisorCodesFromRefs(refs: BranchAdvisorRef[]): string[] {
-  return [...new Set(refs.map((r) => r.code).filter(Boolean))];
-}
-
 function availableEntryToCode(x: unknown): string {
   if (typeof x === 'string') return x.trim();
   if (x && typeof x === 'object' && 'code' in x) return String((x as BranchAdvisorRef).code).trim();
@@ -103,21 +112,6 @@ function formatAvailableAdvisorsList(list: unknown[] | undefined): string {
     })
     .filter(Boolean)
     .join(', ');
-}
-
-/** Exclude branch codes already listed as room occupants (Matrix ids in occupied rarely match bank codes). */
-function getFilteredAdvisorCodesForRoom(
-  baseCodes: string[],
-  room: { advisorType?: string; occupiedAdvisorIds?: string[] }
-): string[] {
-  const occupied = new Set((room.occupiedAdvisorIds ?? []).map((x) => String(x).trim()).filter(Boolean));
-  return baseCodes.filter((code) => !occupied.has(code));
-}
-
-function advisorOptionLabel(code: string, refByCode: Map<string, BranchAdvisorRef>): string {
-  const ref = refByCode.get(code);
-  const name = ref?.fullName?.trim();
-  return name ? `${name} (${code})` : code;
 }
 
 /**
@@ -645,14 +639,6 @@ export function Absence() {
   }>;
   const transferType = (transferInstance?.attributes?.transferType as string) ?? '';
 
-  const codesFromEnrichedUnique = [
-    ...new Set(enriched.flatMap((r) => (r.availableAdvisors ?? []).map(availableEntryToCode).filter(Boolean))),
-  ];
-  const baseAdvisorKeysList =
-    advisorCodesFromRefs(parsedTransferAdvisorRefs).length > 0
-      ? advisorCodesFromRefs(parsedTransferAdvisorRefs)
-      : codesFromEnrichedUnique;
-
   const advisorRefByCode = new Map<string, BranchAdvisorRef>();
   parsedTransferAdvisorRefs.forEach((r) => advisorRefByCode.set(r.code, r));
   enriched.forEach((row) => {
@@ -1114,33 +1100,29 @@ export function Absence() {
                           </>
                         ) : (
                           <>
-                            <div className="flex gap-2 mb-4" style={{ flexWrap: 'wrap' }}>
-                              <select
+                            <div className="flex gap-2 mb-4" style={{ flexWrap: 'wrap', alignItems: 'center' }}>
+                              <input
+                                type="text"
                                 className="form-input"
+                                placeholder="Hedef danışman (Matrix ID veya sicil)"
                                 value={bulkAssignAdvisor}
                                 onChange={(e) => setBulkAssignAdvisor(e.target.value)}
-                                style={{ minWidth: 180 }}
-                              >
-                                <option value="">— Seçilenleri ata —</option>
-                                {baseAdvisorKeysList.map((adv) => (
-                                  <option key={adv} value={adv}>
-                                    {advisorOptionLabel(adv, advisorRefByCode)}
-                                  </option>
-                                ))}
-                              </select>
+                                style={{ minWidth: 220 }}
+                              />
                               <button
                                 className="btn btn-secondary btn-sm"
                                 onClick={() => {
-                                  if (!bulkAssignAdvisor) return;
+                                  const v = bulkAssignAdvisor.trim();
+                                  if (!v) return;
                                   setPermanentAssignments((prev) => {
                                     const next = { ...prev };
-                                    selectedRoomKeys.forEach((k) => { next[k] = bulkAssignAdvisor; });
+                                    selectedRoomKeys.forEach((k) => { next[k] = v; });
                                     return next;
                                   });
                                 }}
-                                disabled={selectedRoomKeys.size === 0 || !bulkAssignAdvisor}
+                                disabled={selectedRoomKeys.size === 0 || !bulkAssignAdvisor.trim()}
                               >
-                                Seçilenleri ata
+                                Seçilen satırlara uygula
                               </button>
                             </div>
                             <div className="table-wrapper">
@@ -1159,14 +1141,13 @@ export function Absence() {
                                     </th>
                                     <th>Oda</th>
                                     <th>Müşteri</th>
-                                    <th>Hedef Danışman</th>
+                                    <th>Hedef Danışman (Matrix ID)</th>
                                     <th>Mesaj geçmişi (yeni üye)</th>
                                   </tr>
                                 </thead>
                                 <tbody>
                                   {permRooms.map((r) => {
                                     const k = r.chatRoomKey ?? r.key ?? r.instanceKey ?? '?';
-                                    const advisorOptions = getFilteredAdvisorCodesForRoom(baseAdvisorKeysList, r);
                                     return (
                                       <tr key={k}>
                                         <td>
@@ -1180,23 +1161,18 @@ export function Absence() {
                                           />
                                         </td>
                                         <td className="font-mono text-sm">{k}</td>
-                                        <td>{userName(r.user)}</td>
+                                        <td><CustomerCell user={r.user} /></td>
                                         <td>
-                                          <select
-                                            className="form-input"
+                                          <input
+                                            type="text"
+                                            className="form-input font-mono text-sm"
+                                            placeholder="morph-touch.portfolio-manager.pm-002"
                                             value={permanentAssignments[k] ?? ''}
                                             onChange={(e) =>
                                               setPermanentAssignments((prev) => ({ ...prev, [k]: e.target.value }))
                                             }
-                                            style={{ minWidth: 160 }}
-                                          >
-                                            <option value="">— Seçin —</option>
-                                            {advisorOptions.map((adv) => (
-                                              <option key={adv} value={adv}>
-                                                {advisorOptionLabel(adv, advisorRefByCode)}
-                                              </option>
-                                            ))}
-                                          </select>
+                                            style={{ minWidth: 200 }}
+                                          />
                                         </td>
                                         <td>
                                           <select
@@ -1426,21 +1402,22 @@ export function Absence() {
                             <tr>
                               <th>Oda</th>
                               <th>Müşteri</th>
-                              <th>Hedef Danışman</th>
+                              <th>Hedef Danışman (Matrix ID)</th>
                               <th>Mesaj geçmişi (yeni üye)</th>
                             </tr>
                           </thead>
                           <tbody>
                             {permRooms.map((r) => {
                               const k = r.chatRoomKey ?? r.key ?? r.instanceKey ?? '?';
-                              const advisorOptions = getFilteredAdvisorCodesForRoom(baseAdvisorKeysList, r);
                               return (
                                 <tr key={k}>
                                   <td className="font-mono text-sm">{k}</td>
-                                  <td>{userName(r.user)}</td>
+                                  <td><CustomerCell user={r.user} /></td>
                                   <td>
-                                    <select
-                                      className="form-input"
+                                    <input
+                                      type="text"
+                                      className="form-input font-mono text-sm"
+                                      placeholder="morph-touch.portfolio-manager.pm-002"
                                       value={permanentAssignments[k] ?? ''}
                                       onChange={(e) =>
                                         setPermanentAssignments((prev) => ({
@@ -1448,15 +1425,8 @@ export function Absence() {
                                           [k]: e.target.value,
                                         }))
                                       }
-                                      style={{ minWidth: 160 }}
-                                    >
-                                      <option value="">— Seçin —</option>
-                                      {advisorOptions.map((adv) => (
-                                        <option key={adv} value={adv}>
-                                          {advisorOptionLabel(adv, advisorRefByCode)}
-                                        </option>
-                                      ))}
-                                    </select>
+                                      style={{ minWidth: 200 }}
+                                    />
                                   </td>
                                   <td>
                                     <select
