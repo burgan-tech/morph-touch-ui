@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, Fragment } from 'react';
+import { useEffect, useMemo, useState, useCallback, Fragment } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   MessageSquare,
@@ -22,6 +22,7 @@ import {
   startInstance,
   runTransition,
   getInstance,
+  listInstances,
 } from '../../lib/api';
 
 interface AdvisorPresence {
@@ -39,6 +40,11 @@ interface ReservationInstance {
   attributes: {
     user?: string;
     advisor?: string;
+    // Filled by add-invited-participant (e.g. via leave/handover transfer) so a
+    // customer's appointment can be served by an advisor different from the
+    // original `advisor`. Used together with `advisor` when assigning a
+    // reservation to a card on the customer Dashboard.
+    invitedUser?: string[];
     startDateTime?: string;
     endDateTime?: string;
     videoCallUrls?: Record<string, string>[];
@@ -137,12 +143,32 @@ function getRoomTypeLabel(roomType?: string): string {
   return roomType === 'permanent' ? 'Kalıcı Oda' : roomType === 'rezervation' ? 'Rezervasyon' : roomType ?? '—';
 }
 
-function getRoomAdvisors(room: ChatRoomInstance): string {
+/**
+ * Format the advisor column for a chat-room row. Emits `SICIL - AD SOYAD`
+ * for every advisor in the room, falling back to just the sicil when the
+ * name has not been resolved yet (or `—` when no advisor is on the room).
+ *
+ * `advisorNames` is keyed by sicil and is populated by the Dashboard's
+ * portfolio-manager / investment-advisor lookup effect.
+ */
+function getRoomAdvisors(room: ChatRoomInstance, advisorNames: Record<string, string>): string {
   const members = room.members ?? [];
-  const advisors = members
+  const fromMembers = members
     .filter((m) => m.role === 'advisor' || m.role === 'member')
-    .map((m) => m.memberId);
-  return advisors.length > 0 ? advisors.join(', ') : room.advisorId ?? '—';
+    .map((m) => m.memberId)
+    .filter((id): id is string => typeof id === 'string' && id.length > 0);
+  const sicils = fromMembers.length > 0
+    ? fromMembers
+    : room.advisorId
+      ? [room.advisorId]
+      : [];
+  if (sicils.length === 0) return '—';
+  return sicils
+    .map((sicil) => {
+      const name = advisorNames[sicil];
+      return name ? `${sicil} - ${name}` : sicil;
+    })
+    .join(', ');
 }
 
 function getRoomDateDisplay(room: ChatRoomInstance): string {
@@ -244,6 +270,11 @@ export function Dashboard() {
   const [roomMessages, setRoomMessages] = useState<RoomMessage[]>([]);
   const [roomMessagesLoading, setRoomMessagesLoading] = useState(false);
   const [startMeetLoading, setStartMeetLoading] = useState<string | null>(null);
+  const [videoCallModal, setVideoCallModal] = useState<{
+    reservation: ReservationInstance;
+    status: 'starting' | 'waiting' | 'ready';
+    videoUrl: string | null;
+  } | null>(null);
   const [confirmReservation, setConfirmReservation] = useState<{ instanceId: string } | null>(null);
   const [confirmReservationSnapshot, setConfirmReservationSnapshot] = useState<{
     advisor: string;
@@ -254,10 +285,40 @@ export function Dashboard() {
   const [confirmReservationTransitioning, setConfirmReservationTransitioning] = useState(false);
   const [reservationSuccessModalOpen, setReservationSuccessModalOpen] = useState(false);
   const [advisorPresence, setAdvisorPresence] = useState<Record<string, AdvisorPresence>>({});
+  // Map advisor key (e.g. "U02917") -> human-readable name (e.g. "MERVE YILDIZ").
+  // Populated from the portfolio-manager / investment-advisor workflow instances
+  // so we can show the actual person instead of the registry number.
+  const [advisorNames, setAdvisorNames] = useState<Record<string, string>>({});
+
+  // `data/customers.ts` carries the original (static) PM/IA assignment, but the
+  // person actually serving the customer can change after a termination/handover.
+  // Whenever the customer has an active permanent chat-room for PM/IA, the
+  // room's advisor sicil overrides the static fixture so the Dashboard shows
+  // (and interacts with) the real current advisor instead of the obsolete one.
+  //
+  // NOTE: The chat-room API returns the room status as the literal string
+  // `activated` for live rooms and `deactived` (one 'a', upstream spelling) for
+  // closed ones. We positive-match `activated` here so we don't accidentally
+  // pick the previous (deactivated) advisor's room.
+  const isLivePermanentRoom = (r: ChatRoomInstance, kind: 'PM' | 'IA'): boolean =>
+    String(r.advisorType ?? '').toUpperCase() === kind
+      && r.roomType === 'permanent'
+      && (r.status ?? '').toLowerCase() === 'activated'
+      && !!r.advisorId;
+
+  const effectivePmKey = useMemo(() => {
+    const room = rooms.find((r) => isLivePermanentRoom(r, 'PM'));
+    return room?.advisorId ?? pmKey;
+  }, [rooms, pmKey]);
+
+  const effectiveIaKey = useMemo(() => {
+    const room = rooms.find((r) => isLivePermanentRoom(r, 'IA'));
+    return room?.advisorId ?? iaKey;
+  }, [rooms, iaKey]);
 
   useEffect(() => {
     let cancelled = false;
-    const advisorKeys = [pmKey, iaKey].filter((k): k is string => typeof k === 'string' && k.length > 0);
+    const advisorKeys = [effectivePmKey, effectiveIaKey].filter((k): k is string => typeof k === 'string' && k.length > 0);
     if (advisorKeys.length === 0) return;
 
     const refresh = async () => {
@@ -284,7 +345,84 @@ export function Dashboard() {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [pmKey, iaKey]);
+  }, [effectivePmKey, effectiveIaKey]);
+
+  // Resolve human-readable names for the assigned PM/IA so the Dashboard shows
+  // "MERVE YILDIZ" instead of the registry number ("U02917") next to each role.
+  // Also pull names for every advisor referenced by an existing chat-room so
+  // the "Geçmiş Görüşmelerim" table can render `SICIL - AD SOYAD` for the
+  // former advisor on a deactivated handover room as well.
+  useEffect(() => {
+    let cancelled = false;
+    const pmKeys = new Set<string>();
+    const iaKeys = new Set<string>();
+    if (effectivePmKey) pmKeys.add(effectivePmKey);
+    if (effectiveIaKey) iaKeys.add(effectiveIaKey);
+    for (const room of rooms) {
+      const typed = String(room.advisorType ?? '').toUpperCase();
+      const bucket = typed === 'PM' ? pmKeys : typed === 'IA' ? iaKeys : null;
+      if (!bucket) continue;
+      if (room.advisorId) bucket.add(room.advisorId);
+      for (const m of room.members ?? []) {
+        if ((m.role !== 'advisor' && m.role !== 'member') || !m.memberId) continue;
+        bucket.add(m.memberId);
+      }
+    }
+    const targets: { key: string; workflow: 'portfolio-manager' | 'investment-advisor' }[] = [
+      ...Array.from(pmKeys).map((k) => ({ key: k, workflow: 'portfolio-manager' as const })),
+      ...Array.from(iaKeys).map((k) => ({ key: k, workflow: 'investment-advisor' as const })),
+    ];
+    if (targets.length === 0) return;
+
+    const buildName = (attrs: Record<string, unknown> | undefined): string => {
+      if (!attrs) return '';
+      const first = String(attrs.firstName ?? '').trim();
+      const last = String(attrs.lastName ?? '').trim();
+      return `${first} ${last}`.trim();
+    };
+
+    const fetchByKey = async (key: string, workflow: string): Promise<string> => {
+      try {
+        const res = await getInstance(workflow, key);
+        if (res.ok && res.data) {
+          const d = res.data as { attributes?: Record<string, unknown> };
+          const name = buildName(d.attributes);
+          if (name) return name;
+        }
+      } catch {
+        /* ignore – fall back to list lookup */
+      }
+      try {
+        const list = await listInstances(workflow, { pageSize: 100 });
+        if (list.ok && list.data) {
+          const items = (list.data as { items?: { key?: string; attributes?: Record<string, unknown> }[] }).items ?? [];
+          const match = items.find((i) => i.key === key);
+          if (match) return buildName(match.attributes);
+        }
+      } catch {
+        /* ignore */
+      }
+      return '';
+    };
+
+    (async () => {
+      const entries = await Promise.all(
+        targets.map(async (t) => [t.key, await fetchByKey(t.key, t.workflow)] as const),
+      );
+      if (cancelled) return;
+      setAdvisorNames((prev) => {
+        const next = { ...prev };
+        for (const [k, name] of entries) {
+          if (name) next[k] = name;
+        }
+        return next;
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [effectivePmKey, effectiveIaKey, rooms]);
 
   const fetchReservations = useCallback(async () => {
     if (!customerId) return;
@@ -317,6 +455,37 @@ export function Dashboard() {
     fetchReservations();
     fetchRooms();
   }, [fetchReservations, fetchRooms]);
+
+  useEffect(() => {
+    if (!videoCallModal || videoCallModal.status !== 'waiting' || !customerId) return;
+    const r = videoCallModal.reservation;
+    const id = r.id ?? r.key;
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await getInstance('rezervation', id);
+        if (cancelled) return;
+        const data = res.data as { attributes?: { videoCallUrls?: Record<string, string>[] }; videoCallUrls?: Record<string, string>[] } | null;
+        const urls = data?.attributes?.videoCallUrls ?? data?.videoCallUrls;
+        if (urls && Array.isArray(urls) && urls.length > 0) {
+          const myEntry = urls.find((u) => u && customerId in u);
+          if (myEntry && myEntry[customerId]) {
+            setVideoCallModal((prev) => prev ? { ...prev, status: 'ready', videoUrl: myEntry[customerId] } : null);
+            return;
+          }
+        }
+      } catch {
+        /* retry */
+      }
+      if (!cancelled) setTimeout(poll, 3000);
+    };
+    const timer = setTimeout(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [videoCallModal?.status, videoCallModal?.reservation.key, customerId]);
 
   useEffect(() => {
     const instanceId = confirmReservation?.instanceId;
@@ -473,18 +642,28 @@ export function Dashboard() {
   });
 
   const now = Date.now();
-  const thirtyMin = 30 * 60 * 1000;
+  const fifteenMin = 30 * 60 * 1000;
   const upcomingSoon = activeReservations.filter((r) => {
     const start = r.attributes?.startDateTime;
     const end = r.attributes?.endDateTime;
     if (!start || !end) return false;
     const startTs = new Date(start).getTime();
     const endTs = new Date(end).getTime();
-    return now >= startTs - thirtyMin && now <= endTs;
+    return now >= startTs - fifteenMin && now <= endTs;
   });
 
+  // A reservation belongs to an advisor card if either the primary `advisor`
+  // matches the card's effective sicil OR the advisor has been added as an
+  // invited participant (e.g. after a handover/transfer where the original
+  // advisor left). Both branches are required so the customer keeps seeing the
+  // appointment under the right card across termination handovers.
   const reservationsByAdvisor = (advisorKey: string): ReservationInstance[] =>
-    activeReservations.filter((r) => (r.attributes?.advisor ?? '').includes(advisorKey));
+    activeReservations.filter((r) => {
+      const advisor = r.attributes?.advisor ?? '';
+      if (advisor.includes(advisorKey)) return true;
+      const invited = r.attributes?.invitedUser;
+      return Array.isArray(invited) && invited.includes(advisorKey);
+    });
 
   const handleMessage = async (advisorKey: string, advisorType: 'PM' | 'IA') => {
     if (!customerId) return;
@@ -512,6 +691,7 @@ export function Dashboard() {
   const handleStartMeet = async (r: ReservationInstance) => {
     if (!r.key) return;
     setStartMeetLoading(r.key);
+    setVideoCallModal({ reservation: r, status: 'starting', videoUrl: null });
     try {
       const res = await startInstance('rezervation-start', {
         key: `rezervation-start-${Date.now()}`,
@@ -519,15 +699,18 @@ export function Dashboard() {
         attributes: { randevuKey: r.key, participantType: 'customer' },
       });
       if (res.ok) {
+        setVideoCallModal((prev) => prev ? { ...prev, status: 'waiting' } : null);
         fetchReservations();
         const rezervationId = encodeURIComponent(r.id ?? r.key);
         navigate(`/customer/video-call?rezervation=${rezervationId}`);
       } else {
         const err = (res.data as Record<string, unknown>)?.error ?? 'Görüşme başlatılamadı';
         toast(String(err), 'error');
+        setVideoCallModal(null);
       }
     } catch (e) {
       toast(String(e), 'error');
+      setVideoCallModal(null);
     } finally {
       setStartMeetLoading(null);
     }
@@ -747,8 +930,8 @@ export function Dashboard() {
   };
 
   const advisors = [
-    { key: pmKey, type: 'PM' as const, label: 'Portföy Yöneticisi', Icon: Briefcase },
-    { key: iaKey, type: 'IA' as const, label: 'Yatırım Danışmanı', Icon: TrendingUp },
+    { key: effectivePmKey, type: 'PM' as const, label: 'Portföy Yöneticisi', Icon: Briefcase },
+    { key: effectiveIaKey, type: 'IA' as const, label: 'Yatırım Danışmanı', Icon: TrendingUp },
   ];
 
   const isPrivatePlus = segment === 'Private Plus';
@@ -771,12 +954,14 @@ export function Dashboard() {
                 const presence = advisorPresence[key];
                 const isOnLeave = presence?.onLeave === true;
                 const onLeaveTooltip = 'Şu an izinli';
+                const advisorDisplayName = advisorNames[key] ?? '';
+                const advisorSubtitle = advisorDisplayName || (key.split('.').pop() ?? key);
                 return (
                   <div key={key} className="card p-4" style={{ minWidth: 280, maxWidth: 360 }}>
                     <div className="flex items-center gap-2 mb-3">
                       <Icon size={24} />
                       <span className="font-medium">{label}</span>
-                      <span className="text-muted text-sm">{key.split('.').pop()}</span>
+                      <span className="text-muted text-sm">{advisorSubtitle}</span>
                       {isOnLeave && (
                         <span
                           className="advisor-card-state-on-leave"
@@ -935,7 +1120,7 @@ export function Dashboard() {
                       <thead>
                         <tr>
                           <th>Tip</th>
-                          <th>Danışman / Danışmanlar</th>
+                          <th>Danışman</th>
                           <th>Tarih / Saat</th>
                           <th></th>
                         </tr>
@@ -944,7 +1129,7 @@ export function Dashboard() {
                         {rooms.map((room, idx) => (
                           <tr key={room.instanceKey ?? `room-${idx}`}>
                             <td>{getRoomTypeLabel(room.roomType)}</td>
-                            <td>{getRoomAdvisors(room)}</td>
+                            <td>{getRoomAdvisors(room, advisorNames)}</td>
                             <td>{getRoomDateDisplay(room)}</td>
                             <td>
                               <button
@@ -1194,7 +1379,7 @@ export function Dashboard() {
       <Modal
         open={!!roomDetail}
         onClose={() => { setRoomDetail(null); setRoomMessages([]); }}
-        title={roomDetail ? `${getRoomTypeLabel(roomDetail.roomType)} – ${getRoomAdvisors(roomDetail)}` : 'Oda'}
+        title={roomDetail ? `${getRoomTypeLabel(roomDetail.roomType)} – ${getRoomAdvisors(roomDetail, advisorNames)}` : 'Oda'}
         footer={null}
       >
         {roomDetail && (
@@ -1232,6 +1417,50 @@ export function Dashboard() {
         )}
       </Modal>
 
+      {/* Video call modal */}
+      <Modal
+        open={!!videoCallModal}
+        onClose={() => setVideoCallModal(null)}
+        title="Görüntülü Görüşme"
+        footer={
+          videoCallModal?.status === 'ready' ? (
+            <>
+              <button className="btn btn-secondary" onClick={() => setVideoCallModal(null)}>Kapat</button>
+              <a href={videoCallModal.videoUrl!} target="_blank" rel="noreferrer" className="btn btn-primary">
+                <Video size={16} /> Görüşmeye Katıl
+              </a>
+            </>
+          ) : (
+            <button className="btn btn-secondary" onClick={() => setVideoCallModal(null)}>İptal</button>
+          )
+        }
+      >
+        {videoCallModal?.status === 'starting' && (
+          <div style={{ textAlign: 'center', padding: 32 }}>
+            <RefreshCw size={32} className="animate-spin" style={{ margin: '0 auto 16px', display: 'block' }} />
+            <p>Bağlantınız kuruluyor...</p>
+          </div>
+        )}
+        {videoCallModal?.status === 'waiting' && (
+          <div style={{ textAlign: 'center', padding: 32 }}>
+            <Video size={48} strokeWidth={1.5} style={{ margin: '0 auto 16px', display: 'block', color: 'var(--color-primary)' }} />
+            <p style={{ fontWeight: 600, fontSize: 16, marginBottom: 8 }}>
+              Danışmanınıza bildirim gönderildi
+            </p>
+            <p className="text-muted">
+              Onay verdiğinde görüntülü görüşmeniz başlayacaktır.
+            </p>
+            <RefreshCw size={20} className="animate-spin" style={{ margin: '16px auto 0', display: 'block', color: 'var(--color-muted)' }} />
+          </div>
+        )}
+        {videoCallModal?.status === 'ready' && (
+          <div style={{ textAlign: 'center', padding: 32 }}>
+            <Video size={48} strokeWidth={1.5} style={{ margin: '0 auto 16px', display: 'block', color: 'var(--color-success, #16a34a)' }} />
+            <p style={{ fontWeight: 600, fontSize: 16 }}>Görüntülü görüşme hazır!</p>
+            <p className="text-muted">Görüşmeye katılmak için aşağıdaki butonu kullanın.</p>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

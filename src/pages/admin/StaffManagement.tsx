@@ -10,13 +10,13 @@ import {
 } from 'lucide-react';
 import { listInstances, startInstance, runTransition, getAbsenceEntries, getAdvisorOnLeave, syncAdvisorPresence } from '../../lib/api';
 import { cn } from '../../lib/utils';
-import { DAY_LABELS } from '../../lib/constants';
+import { DAY_LABELS, ADVISOR_ROLE_LABELS } from '../../lib/constants';
 import { Badge, Card, CardHeader, CardBody, EmptyState, Modal, toast } from '../../components/ui';
 
 const ROLE_OPTIONS = [
   { value: '', label: 'Tümü' },
-  { value: 'PY', label: 'PY' },
-  { value: 'YD', label: 'YD' },
+  { value: 'PY', label: ADVISOR_ROLE_LABELS.PY },
+  { value: 'YD', label: ADVISOR_ROLE_LABELS.YD },
 ];
 
 const STATUS_OPTIONS = [
@@ -63,6 +63,14 @@ function staffRegistryNumber(inst: VnextInstance): string {
 
 function staffName(inst: VnextInstance): string {
   return staffRegistryNumber(inst) || (inst.attributes?.advisorId as string) || inst.key || '—';
+}
+
+/** Returns "FIRSTNAME LASTNAME" if the runtime instance has them filled, else ''. */
+function staffFullName(inst: VnextInstance): string {
+  const a = inst.attributes ?? {};
+  const first = ((a.firstName as string) ?? '').trim();
+  const last = ((a.lastName as string) ?? '').trim();
+  return `${first} ${last}`.trim();
 }
 
 function staffRole(inst: VnextInstance): string {
@@ -226,11 +234,12 @@ export function StaffManagement() {
     if (roleFilter && staffRole(s) !== roleFilter) return false;
     const state = s.metadata?.currentState ?? '';
     if (statusFilter && state !== statusFilter) return false;
-    const name = staffName(s).toLowerCase();
-    const advisorId = String(s.attributes?.advisorId ?? '').toLowerCase();
     if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      if (!name.includes(q) && !advisorId.includes(q)) return false;
+      const q = searchQuery.toLocaleLowerCase('tr');
+      const name = staffName(s).toLocaleLowerCase('tr');
+      const fullName = staffFullName(s).toLocaleLowerCase('tr');
+      const advisorId = String(s.attributes?.advisorId ?? '').toLocaleLowerCase('tr');
+      if (!name.includes(q) && !fullName.includes(q) && !advisorId.includes(q)) return false;
     }
     return true;
   });
@@ -415,7 +424,7 @@ export function StaffManagement() {
                 <input
                   type="text"
                   className="form-input"
-                  placeholder="Sicil no veya danışman ID..."
+                  placeholder="Sicil no, ad-soyad veya danışman ID..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                 />
@@ -434,7 +443,7 @@ export function StaffManagement() {
                 <table className="table">
                   <thead>
                     <tr>
-                      <th>Sicil No</th>
+                      <th>Danışman</th>
                       <th>Rol</th>
                       <th>Durum</th>
                       <th>İşlemler</th>
@@ -444,18 +453,17 @@ export function StaffManagement() {
                     {filteredStaff.map((s) => {
                       const state = s.metadata?.currentState ?? 'draft';
                       const onLeave = onLeaveMap[s.key] === true;
+                      const fullName = staffFullName(s);
+                      const role = staffRole(s);
                       return (
                         <tr key={s.key}>
                           <td>
-                            <button
-                              type="button"
-                              className="text-left font-medium hover:underline"
-                              onClick={() => openDetail(s)}
-                            >
-                              {staffName(s)}
-                            </button>
+                            <div className="flex flex-col" style={{ lineHeight: 1.25 }}>
+                              <span className="font-medium">{staffName(s)}</span>
+                              {fullName && <span className="text-muted text-xs">{fullName}</span>}
+                            </div>
                           </td>
-                          <td>{staffRole(s)}</td>
+                          <td>{ADVISOR_ROLE_LABELS[role] ?? role}</td>
                           <td>
                             <div className="flex items-center gap-2">
                               <Badge state={state} />
@@ -479,6 +487,14 @@ export function StaffManagement() {
                           </td>
                           <td>
                             <div className="flex gap-2">
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => openDetail(s)}
+                                title="Çalışma saatlerini görüntüle"
+                              >
+                                <Clock size={14} />
+                                Çalışma Saatleri
+                              </button>
                               {state === 'draft' && (
                                 <button
                                   className="btn btn-primary btn-sm"
@@ -581,8 +597,8 @@ export function StaffManagement() {
               value={addForm.role}
               onChange={(e) => setAddForm((p) => ({ ...p, role: e.target.value }))}
             >
-              <option value="PY">PY</option>
-              <option value="YD">YD</option>
+              <option value="PY">{ADVISOR_ROLE_LABELS.PY}</option>
+              <option value="YD">{ADVISOR_ROLE_LABELS.YD}</option>
             </select>
           </div>
         </div>
@@ -592,7 +608,11 @@ export function StaffManagement() {
       <Modal
         open={detailModalOpen}
         onClose={() => { setDetailModalOpen(false); setDetailStaff(null); }}
-        title={detailStaff ? staffName(detailStaff) : 'Personel Detayı'}
+        title={
+          detailStaff
+            ? `${staffName(detailStaff)}${staffFullName(detailStaff) ? ` – ${staffFullName(detailStaff)}` : ''} – Çalışma Saatleri`
+            : 'Çalışma Saatleri'
+        }
         footer={null}
       >
         {detailStaff && (
@@ -688,8 +708,8 @@ export function StaffManagement() {
               value={editForm.role}
               onChange={(e) => setEditForm((p) => ({ ...p, role: e.target.value }))}
             >
-              <option value="PY">PY</option>
-              <option value="YD">YD</option>
+              <option value="PY">{ADVISOR_ROLE_LABELS.PY}</option>
+              <option value="YD">{ADVISOR_ROLE_LABELS.YD}</option>
             </select>
           </div>
         </div>

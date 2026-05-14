@@ -59,6 +59,17 @@ export const STATE_LABELS: Record<string, string> = {
   completed: 'Tamamlandı',
   creating: 'Oluşturuluyor',
   failed: 'Başarısız',
+  // Advisor roles - rendered through the shared `Badge` component so the
+  // admin/settings → "Danışmana Özel Çalışma Saatleri" table shows the full
+  // Turkish role name instead of the PY/YD short code.
+  PY: 'Portföy Yöneticisi',
+  YD: 'Yatırım Danışmanı',
+};
+
+/** Long Turkish labels for advisor role codes (PY = portföy yöneticisi, YD = yatırım danışmanı). */
+export const ADVISOR_ROLE_LABELS: Record<string, string> = {
+  PY: 'Portföy Yöneticisi',
+  YD: 'Yatırım Danışmanı',
 };
 
 export const DAY_LABELS: Record<string, string> = {

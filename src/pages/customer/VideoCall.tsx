@@ -24,7 +24,9 @@ import { unwrapMorphTouchInstance } from '../../lib/unwrapMorphTouchInstance';
 import { setLiveKitMorphVideoToken } from '../../lib/livekitMorphToken';
 import { cn } from '../../lib/utils';
 import { toast } from '../../components/ui';
+import { VideoCallMatrixChat } from '../../components/VideoCallMatrixChat';
 import { useCustomerContext } from '../../contexts/CustomerContext';
+import { extractChatIntegrationMatrixRoomId } from '../../lib/rezervationChatIntegration';
 
 interface RezervationAttributes {
   videoCallUrls?: Record<string, string>[];
@@ -157,6 +159,9 @@ function ActiveCustomerCall({
   token,
   morphVideoToken,
   connectOptions,
+  matrixRoomId,
+  customerId,
+  customerName,
   onLeave,
   onCallFailure,
 }: {
@@ -164,6 +169,9 @@ function ActiveCustomerCall({
   token: string;
   morphVideoToken: string | null;
   connectOptions?: RoomConnectOptions;
+  matrixRoomId: string | null;
+  customerId: string;
+  customerName?: string;
   onLeave: () => void;
   onCallFailure: (message: string) => void;
 }) {
@@ -208,17 +216,25 @@ function ActiveCustomerCall({
         toast(err.message, 'error');
         reportFailureOnce(err.message || String(err));
       }}
-      style={{ display: 'flex', flexDirection: 'column', height: '100%' }}
+      style={{ display: 'flex', flexDirection: 'column', height: '100%', minHeight: 0 }}
     >
       <RoomAudioRenderer />
-      <div className="video-call-container" style={{ flex: 1, minHeight: 0, position: 'relative' }}>
-        <div className="video-call-main" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-          <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
-            <RemoteAdvisorStage />
-            <LocalCameraPreview />
-            <CustomerVideoControls onLeave={handleUserLeave} />
+      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
+        <div className="video-call-container" style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+          <div className="video-call-main" style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+            <div style={{ flex: 1, position: 'relative', display: 'flex', flexDirection: 'column', minHeight: 0 }}>
+              <RemoteAdvisorStage />
+              <LocalCameraPreview />
+              <CustomerVideoControls onLeave={handleUserLeave} />
+            </div>
           </div>
         </div>
+        <VideoCallMatrixChat
+          matrixRoomId={matrixRoomId}
+          role="customer"
+          customerId={customerId}
+          customerDisplayName={customerName}
+        />
       </div>
     </LiveKitRoom>
   );
@@ -227,7 +243,7 @@ function ActiveCustomerCall({
 export function VideoCall() {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { customerId } = useCustomerContext();
+  const { customerId, customerName } = useCustomerContext();
   const rezervationId = searchParams.get('rezervation')?.trim() ?? '';
 
   const [phase, setPhase] = useState<'poll' | 'live' | 'error'>('poll');
@@ -236,6 +252,7 @@ export function VideoCall() {
   const [serverUrl, setServerUrl] = useState<string | null>(null);
   const [morphVideoToken, setMorphVideoToken] = useState<string | null>(null);
   const [connectOptions, setConnectOptions] = useState<RoomConnectOptions | undefined>();
+  const [matrixRoomId, setMatrixRoomId] = useState<string | null>(null);
 
   const goDashboard = useCallback(() => {
     navigate('/customer', { replace: true });
@@ -249,6 +266,7 @@ export function VideoCall() {
     setServerUrl(null);
     setMorphVideoToken(null);
     setConnectOptions(undefined);
+    setMatrixRoomId(null);
   }, []);
 
   useEffect(() => {
@@ -263,6 +281,7 @@ export function VideoCall() {
       return;
     }
 
+    setMatrixRoomId(null);
     const cancelledRef = { current: false };
     const timerRef = { current: undefined as ReturnType<typeof setTimeout> | undefined };
     const videoAuthRef = { current: null as string | null };
@@ -339,6 +358,7 @@ export function VideoCall() {
               setConnectOptions(liveKitConnectOptions);
               setServerUrl(resolved.serverUrl);
               setToken(resolved.token);
+              setMatrixRoomId(extractChatIntegrationMatrixRoomId(instanceRoot));
               setPhase('live');
               return;
             }
@@ -352,6 +372,7 @@ export function VideoCall() {
             setConnectOptions(liveKitConnectOptions);
             setServerUrl(getLiveKitServerUrl());
             setToken(t);
+            setMatrixRoomId(extractChatIntegrationMatrixRoomId(instanceRoot));
             setPhase('live');
             return;
           }
@@ -385,7 +406,7 @@ export function VideoCall() {
     );
   }
 
-  if (phase === 'poll' || !token || !serverUrl) {
+  if (phase === 'poll' || !token || !serverUrl || !customerId) {
     return (
       <div className="page" style={{ height: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
         <Video size={48} strokeWidth={1.5} style={{ marginBottom: 16, color: 'var(--color-primary)' }} />
@@ -415,6 +436,9 @@ export function VideoCall() {
         token={token}
         morphVideoToken={morphVideoToken}
         connectOptions={connectOptions}
+        matrixRoomId={matrixRoomId}
+        customerId={customerId}
+        customerName={customerName ?? undefined}
         onLeave={goDashboard}
         onCallFailure={handleCallFailure}
       />

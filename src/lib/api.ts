@@ -66,7 +66,9 @@ export function getInstance(
   instanceId: string,
   headers?: Record<string, string>
 ) {
-  return request(`${BASE_URL}/workflows/${workflow}/instances/${instanceId}`, headers ? { headers } : undefined);
+  return request(`${BASE_URL}/workflows/${workflow}/instances/${instanceId}`, {
+    headers,
+  });
 }
 
 export function listInstances(
@@ -241,6 +243,56 @@ export function getAdvisorStats(advisorId: string, period: 'week' | 'month' = 'w
 export function getCustomerInfo(customerId: string) {
   requireParams('getCustomerInfo', { customerId });
   return callFunction('get-customer-info', {}, { customerId });
+}
+
+/**
+ * Customer notes -- proxied through `customer-notes` workflow functions
+ * to APISIX `/ebanking/customermanagement/wealthapp/...`.
+ *
+ * Identity model:
+ * - `tckn`     => path segment for GET/POST/DELETE (corresponds to user001/002...).
+ *                 Chat/appointments rows currently expose `attributes.user` which
+ *                 carries that value, so callers pass it directly.
+ * - `loginName`=> POST body field. Backend mapping reads it from the `login_name`
+ *                 (snake_case) header to mirror upstream expectation. UI helper
+ *                 hides that detail; callers pass camelCase `loginName`.
+ *
+ * vNext function ingress accepts only GET; the upstream HTTP method is encoded
+ * in the task definition (POST/DELETE for add/delete).
+ */
+export interface CustomerNote {
+  id: string;
+  loginName: string;
+  noteDescription: string;
+  createdAt?: string;
+}
+
+export function getCustomerNotes(tckn: string, loginName: string) {
+  requireParams('getCustomerNotes', { tckn, loginName });
+  return callFunction('get-customer-notes', {}, { tckn, loginName });
+}
+
+export function addCustomerNote(
+  tckn: string,
+  loginName: string,
+  noteDescription: string,
+) {
+  requireParams('addCustomerNote', { tckn, loginName, noteDescription });
+  return callFunction(
+    'add-customer-note',
+    {},
+    {
+      tckn,
+      login_name: loginName,
+      noteDescription: encodeURIComponent(noteDescription),
+      bodyEncoding: 'url',
+    },
+  );
+}
+
+export function deleteCustomerNote(tckn: string, noteId: string) {
+  requireParams('deleteCustomerNote', { tckn, noteId });
+  return callFunction('delete-customer-note', {}, { tckn, noteId });
 }
 
 /**

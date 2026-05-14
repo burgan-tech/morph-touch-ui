@@ -1,5 +1,4 @@
 import { useEffect, useState, useCallback, useRef, Fragment } from 'react';
-import { useNavigate } from 'react-router-dom';
 import {
   Star,
   Send,
@@ -8,17 +7,30 @@ import {
   UserPlus,
   Users,
   MessageSquare,
-  Video,
+  FileText,
 } from 'lucide-react';
-import { getChatRooms, getRoomMessages, sendRoomMessage, getMatrixSync, runTransition, listInstances } from '../../lib/api';
+import { getChatRooms, getRoomMessages, sendRoomMessage, getMatrixSync, runTransition, listInstances, getInstance } from '../../lib/api';
 import { formatTime, formatDate, cn } from '../../lib/utils';
 import { EmptyState, Modal, toast } from '../../components/ui';
+import { CustomerNotesModal } from '../../components/CustomerNotesModal';
 import { useAdvisorContext } from '../../contexts/AdvisorContext';
 import { HISTORY_VISIBILITY_OPTIONS, type MatrixHistoryVisibility } from '../../lib/matrixChat';
+import { getCustomerName } from '../../data/customers';
+
+type AdvisorWorkflow = 'portfolio-manager' | 'investment-advisor';
 
 const FAVORITES_KEY = 'chat-favorites';
 const MAX_FILE_SIZE_MB = 10;
 const ALLOWED_EXTENSIONS = ['.xlsx', '.docx', '.pdf', '.jpg', '.jpeg', '.png'];
+
+// Matrix /sync long-poll back-off bounds.
+// Synapse can return quickly when device_lists / one_time_keys streams advance
+// (independent of our room filter), so we throttle the loop to avoid hammering
+// the runtime. The minimum interval applies even on happy responses; the idle
+// delay kicks in when the long-poll returned with no new room events.
+const SYNC_MIN_INTERVAL_MS = 2000;
+const SYNC_IDLE_DELAY_MS = 5000;
+const SYNC_ERROR_DELAY_MS = 3000;
 
 /* ── types ── */
 
@@ -35,9 +47,6 @@ interface ChatRoomInstance {
     advisorId?: string;
     advisorType?: string;
     roomType?: string;
-    /** Randevu sohbetinde görüntülü görüşme için workflow instance anahtarı */
-    randevuKey?: string;
-    rezervationKey?: string;
     chatIntegration?: { matrix?: { roomId?: string } };
     members?: ChatRoomMember[];
   };
@@ -71,8 +80,6 @@ function normalizeRoom(raw: Record<string, unknown>): ChatRoomInstance {
       advisorId: (raw.advisorId as string) ?? (attrs.advisorId as string),
       advisorType: (raw.advisorType as string) ?? (attrs.advisorType as string),
       roomType: (raw.roomType as string) ?? (attrs.roomType as string),
-      randevuKey: typeof attrs.randevuKey === 'string' ? attrs.randevuKey : undefined,
-      rezervationKey: typeof attrs.rezervationKey === 'string' ? attrs.rezervationKey : undefined,
       chatIntegration: (raw.roomId as string)
         ? { matrix: { roomId: raw.roomId as string } }
         : (attrs.chatIntegration as { matrix?: { roomId?: string } } | undefined),
@@ -127,19 +134,6 @@ function getMatrixRoomId(room: ChatRoomInstance): string | null {
   return ci?.matrix?.roomId ?? ci?.roomId ?? null;
 }
 
-/** `chat-room` randevu tipinde görüntülü görüşme sayfası için rezervasyon instance id. */
-function getRezervationIdForVideoCall(room: ChatRoomInstance): string | null {
-  const a = room.attributes;
-  const fromAttrs =
-    (typeof a?.randevuKey === 'string' && a.randevuKey.trim()) ||
-    (typeof a?.rezervationKey === 'string' && a.rezervationKey.trim()) ||
-    '';
-  if (fromAttrs) return fromAttrs;
-  if (a?.roomType === 'rezervation' && room.id && room.id.trim()) return room.id.trim();
-  if (a?.roomType === 'rezervation' && room.key && room.key.trim()) return room.key.trim();
-  return null;
-}
-
 interface SyncResponse {
   nextBatch: string | null;
   eventsByRoom: Record<string, Array<{ eventId?: string; sender?: string; body?: string; timestamp?: string; msgtype?: string }>>;
@@ -169,6 +163,21 @@ function userName(ref: unknown): string {
   return '—';
 }
 
+/** Müşteri TCKN'sini görünür isim soyisme dönüştür (mock roster'dan), bulunmazsa TCKN'i döner. */
+function customerDisplayName(ref: unknown): string {
+  const id = userName(ref);
+  if (!id || id === '—') return '—';
+  return getCustomerName(id) ?? id;
+}
+
+/** advisorType → workflow adı. Bilinmiyorsa null. */
+function workflowFromAdvisorType(advisorType?: string): AdvisorWorkflow | null {
+  const t = (advisorType ?? '').trim().toUpperCase();
+  if (t === 'PM') return 'portfolio-manager';
+  if (t === 'IA') return 'investment-advisor';
+  return null;
+}
+
 function loadFavorites(): Set<string> {
   try {
     const raw = localStorage.getItem(FAVORITES_KEY);
@@ -185,23 +194,40 @@ function saveFavorites(fav: Set<string>) {
 
 const PENDING_PREFIX = 'pending-';
 
+/**
+ * True when the Matrix sender id belongs to the current advisor.
+ *
+ * Synapse stores localparts case-insensitively and our scripting layer normalizes
+ * non-alphabetic-leading ids (e.g. numeric or uppercase sicil) with a leading "u"
+ * before registration. So the advisor `U02917` shows up on the wire as
+ * `@u02917:localhost`. A plain `.includes(ADVISOR_ID)` then misses the message
+ * and the bubble lands on the wrong side. We compare on the normalized localpart
+ * with both `<sicil>` and `u<sicil>` variants.
+ */
+function isAdvisorSender(sender: string | undefined, advisorId: string): boolean {
+  if (!sender || !advisorId) return false;
+  const localpart = sender.replace(/^@/, '').split(':')[0]?.trim().toLowerCase() ?? '';
+  if (!localpart) return false;
+  const adv = advisorId.trim().toLowerCase();
+  return localpart === adv || localpart === `u${adv}`;
+}
+
 function mergeNewMessages(
   prev: ChatMessage[],
   newMsgs: Array<{ eventId?: string; sender?: string; body?: string; timestamp?: string; msgtype?: string }>,
   advisorId: string
 ): ChatMessage[] {
-  const advisorMatrixId = `@${advisorId}:localhost`;
   const existingIds = new Set(prev.map((m) => m.eventId).filter(Boolean));
   const toAdd = newMsgs
     .filter((m) => m.eventId && !existingIds.has(m.eventId))
     .map((m) => ({
       ...m,
-      isMine: (m.sender ?? '').includes(advisorId) || (m.sender ?? '') === advisorMatrixId,
+      isMine: isAdvisorSender(m.sender, advisorId),
       read: false,
     }));
   if (toAdd.length === 0) return prev;
 
-  const fromUs = toAdd.filter((m) => (m.sender ?? '').includes(advisorId) || (m.sender ?? '') === advisorMatrixId);
+  const fromUs = toAdd.filter((m) => isAdvisorSender(m.sender, advisorId));
   const withoutOptimistic = fromUs.length > 0
     ? prev.filter((m) => {
         if (m.eventId?.startsWith(PENDING_PREFIX) && m.isMine) {
@@ -253,7 +279,6 @@ function validateFile(file: File): string | null {
 
 export function ChatManagement() {
   const ADVISOR_ID = useAdvisorContext().advisorId!;
-  const navigate = useNavigate();
   const [rooms, setRooms] = useState<ChatRoomInstance[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<ChatRoomInstance | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -266,10 +291,16 @@ export function ChatManagement() {
   const [favorites, setFavorites] = useState<Set<string>>(loadFavorites);
   const [transferModal, setTransferModal] = useState(false);
   const [participantsModal, setParticipantsModal] = useState(false);
+  const [notesCustomer, setNotesCustomer] = useState<string | null>(null);
   const [statusDropdownOpen, setStatusDropdownOpen] = useState(false);
   const [statusTransitionLoading, setStatusTransitionLoading] = useState(false);
   const [transferTargetId, setTransferTargetId] = useState('');
   const [unreadRooms, setUnreadRooms] = useState<Set<string>>(new Set());
+  // sicil (örn. "U02917") → isim soyisim ("MERVE YILDIZ"). Hem birincil advisor
+  // hem de room.members içindeki advisor sicilleri için lazy doldurulur; UI'da
+  // sicil/TCKN ham olarak gözükmesin diye sohbet listesi, panel başlığı,
+  // katılımcılar modali ve mesaj balonu sender etiketinde kullanılır.
+  const [advisorNames, setAdvisorNames] = useState<Record<string, string>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const statusDropdownRef = useRef<HTMLDivElement>(null);
@@ -314,10 +345,9 @@ export function ChatManagement() {
             { roomId: matrixRoomId, touchUser: ADVISOR_ID, userType: 'advisor' }
           );
           const apiMsgs = extractMessages(res);
-          const advisorMatrixId = `@${ADVISOR_ID}:localhost`;
           msgs = [...apiMsgs].reverse().map((m) => ({
             ...m,
-            isMine: (m.sender ?? '').includes(ADVISOR_ID) || (m.sender ?? '') === advisorMatrixId,
+            isMine: isAdvisorSender(m.sender, ADVISOR_ID),
             read: false,
           }));
         }
@@ -347,6 +377,9 @@ export function ChatManagement() {
 
     const runSyncLoop = async () => {
       if (syncAbortedRef.current) return;
+      const startedAt = Date.now();
+      let hadRoomEvents = false;
+      let errored = false;
       try {
         const params: {
           user: string;
@@ -363,21 +396,31 @@ export function ChatManagement() {
         if (syncTokenRef.current) params.since = syncTokenRef.current;
 
         const res = await getMatrixSync(params);
+        if (syncAbortedRef.current) return;
         const syncData = extractSyncResponse(res);
-        if (!syncData || syncAbortedRef.current) return;
-
-        if (syncData.nextBatch) syncTokenRef.current = syncData.nextBatch;
-
-        const roomEvents = syncData.eventsByRoom?.[matrixRoomId];
-        if (Array.isArray(roomEvents) && roomEvents.length > 0) {
-          setMessages((prev) => mergeNewMessages(prev, roomEvents, ADVISOR_ID));
+        if (syncData) {
+          if (syncData.nextBatch) syncTokenRef.current = syncData.nextBatch;
+          const roomEvents = syncData.eventsByRoom?.[matrixRoomId];
+          if (Array.isArray(roomEvents) && roomEvents.length > 0) {
+            setMessages((prev) => mergeNewMessages(prev, roomEvents, ADVISOR_ID));
+            hadRoomEvents = true;
+          }
+        } else {
+          errored = true;
         }
       } catch {
-        // Will retry on next loop
+        errored = true;
       }
-      if (!syncAbortedRef.current) {
-        setTimeout(runSyncLoop, 0);
-      }
+      if (syncAbortedRef.current) return;
+      // Throttle: even if Synapse returns instantly (device_lists noise), keep at
+      // least SYNC_MIN_INTERVAL_MS between requests. Add extra idle / error delay
+      // when there is nothing new to merge so we are not polling 5×/sec.
+      const elapsed = Date.now() - startedAt;
+      let minDelay = SYNC_MIN_INTERVAL_MS;
+      if (errored) minDelay = Math.max(minDelay, SYNC_ERROR_DELAY_MS);
+      else if (!hadRoomEvents) minDelay = Math.max(minDelay, SYNC_IDLE_DELAY_MS);
+      const delay = Math.max(0, minDelay - elapsed);
+      setTimeout(runSyncLoop, delay);
     };
 
     runSyncLoop();
@@ -389,6 +432,130 @@ export function ChatManagement() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  /* ── advisor name resolution (sicil → isim soyisim) ──
+   * Aktif odaların birincil advisorId'si + members listesindeki üye sicilleri
+   * için portfolio-manager / investment-advisor instance'larından firstName +
+   * lastName çekilir. Tip biliniyorsa tek workflow sorgulanır; bilinmiyorsa
+   * iki workflow paralel denenir. ChatManagement'ta CustomerContext yok; bu
+   * yüzden müşteri ismi mock roster'dan (`getCustomerName`) çözülür. */
+  useEffect(() => {
+    if (rooms.length === 0) return;
+    let cancelled = false;
+
+    type Target = { key: string; workflow: AdvisorWorkflow };
+    const seen = new Set<string>();
+    const targets: Target[] = [];
+    const pushTarget = (id: string | undefined, advisorType?: string) => {
+      if (!id) return;
+      const trimmed = id.trim();
+      if (!trimmed || seen.has(trimmed)) return;
+      seen.add(trimmed);
+      const wf = workflowFromAdvisorType(advisorType);
+      if (wf) targets.push({ key: trimmed, workflow: wf });
+      else {
+        targets.push({ key: trimmed, workflow: 'portfolio-manager' });
+        targets.push({ key: trimmed, workflow: 'investment-advisor' });
+      }
+    };
+
+    for (const r of rooms) {
+      pushTarget(r.attributes?.advisorId, r.attributes?.advisorType);
+      for (const m of r.attributes?.members ?? []) {
+        const role = (m.role ?? '').trim();
+        // owner = müşteri (TCKN), advisor/member = sicil → sicil olanları çöz
+        if (role === 'owner') continue;
+        pushTarget(m.memberId, r.attributes?.advisorType);
+      }
+    }
+    const missing = targets.filter((t) => !advisorNames[t.key]);
+    if (missing.length === 0) return;
+
+    const buildName = (attrs: Record<string, unknown> | undefined): string => {
+      if (!attrs) return '';
+      const first = String(attrs.firstName ?? '').trim();
+      const last = String(attrs.lastName ?? '').trim();
+      return `${first} ${last}`.trim();
+    };
+
+    const fetchByKey = async (key: string, workflow: AdvisorWorkflow): Promise<string> => {
+      try {
+        const res = await getInstance(workflow, key);
+        if (res.ok && res.data) {
+          const d = res.data as { attributes?: Record<string, unknown> };
+          const name = buildName(d.attributes);
+          if (name) return name;
+        }
+      } catch {
+        /* listInstances fallback aşağıda */
+      }
+      try {
+        const list = await listInstances(workflow, { pageSize: 100 });
+        if (list.ok && list.data) {
+          const items = (list.data as { items?: { key?: string; attributes?: Record<string, unknown> }[] }).items ?? [];
+          const match = items.find((i) => i.key === key);
+          if (match) return buildName(match.attributes);
+        }
+      } catch {
+        /* yut */
+      }
+      return '';
+    };
+
+    (async () => {
+      const resolved = await Promise.all(
+        missing.map(async (t) => [t.key, await fetchByKey(t.key, t.workflow)] as const),
+      );
+      if (cancelled) return;
+      const updates = resolved.filter(([, name]) => name.length > 0);
+      if (updates.length === 0) return;
+      setAdvisorNames((prev) => {
+        const next = { ...prev };
+        for (const [k, name] of updates) {
+          if (!next[k]) next[k] = name;
+        }
+        return next;
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [rooms, advisorNames]);
+
+  /** Matrix `@localpart:server` → kullanıcı dostu isim. Müşteri (TCKN/u+TCKN)
+   * ise mock roster'dan; sicil/u+sicil ise advisorNames map'inden çek. Hiçbiri
+   * eşleşmezse seçili odadaki muhatap rolüne göre "Müşteri" / "Danışman"
+   * fallback'i — sicil ve TCKN ekrana asla yansımaz. */
+  const renderSenderName = useCallback(
+    (sender?: string): string => {
+      const localpart = (sender ?? '').replace(/@|:.*/g, '').trim();
+      if (!localpart) return 'Danışman';
+      const lower = localpart.toLowerCase();
+
+      // Müşteri kontrolü: odanın user'ı / room.members owner'ı
+      const customerId = userName(selectedRoom?.attributes?.user).trim();
+      const cidLower = customerId.toLowerCase();
+      if (cidLower && (lower === cidLower || lower === `u${cidLower}`)) {
+        return customerDisplayName(selectedRoom?.attributes?.user);
+      }
+
+      // Advisor kontrolü: advisorNames içindeki anahtarlarla case + u-prefix toleranslı eşle
+      const matchKey = Object.keys(advisorNames).find((k) => {
+        const kl = k.toLowerCase();
+        return kl === lower || `u${kl}` === lower || kl === `u${lower}`;
+      });
+      if (matchKey) return advisorNames[matchKey];
+
+      // Mesajı atan biz miyiz? (kendi sicilim)
+      const myLower = ADVISOR_ID.toLowerCase();
+      if (lower === myLower || lower === `u${myLower}`) {
+        return advisorNames[ADVISOR_ID] ?? 'Danışman';
+      }
+      return 'Danışman';
+    },
+    [advisorNames, selectedRoom, ADVISOR_ID],
+  );
 
   useEffect(() => {
     if (!statusDropdownOpen) return;
@@ -549,15 +716,12 @@ export function ChatManagement() {
           listInstances('portfolio-manager', { pageSize: 100 }),
           listInstances('investment-advisor', { pageSize: 100 }),
         ]);
-        type AdvisorInst = { key: string; attributes?: Record<string, unknown> };
-        const pmItems: AdvisorInst[] =
-          pmRes.ok && pmRes.data
-            ? ((pmRes.data as { items?: AdvisorInst[] }).items ?? [])
-            : [];
-        const iaItems: AdvisorInst[] =
-          iaRes.ok && iaRes.data
-            ? ((iaRes.data as { items?: AdvisorInst[] }).items ?? [])
-            : [];
+        const pmItems: Array<{ key: string; attributes?: Record<string, unknown> }> = pmRes.ok
+          ? ((pmRes.data as { items?: Array<{ key: string; attributes?: Record<string, unknown> }> })?.items ?? [])
+          : [];
+        const iaItems: Array<{ key: string; attributes?: Record<string, unknown> }> = iaRes.ok
+          ? ((iaRes.data as { items?: Array<{ key: string; attributes?: Record<string, unknown> }> })?.items ?? [])
+          : [];
         const buildName = (inst: { key: string; attributes?: Record<string, unknown> }) => {
           const a = inst.attributes ?? {};
           const first = (a.firstName ?? a.name ?? '') as string;
@@ -649,8 +813,8 @@ export function ChatManagement() {
   };
 
   const filteredRooms = rooms.filter((r) => {
-    const name = userName(r.attributes?.user).toLowerCase();
-    const matchSearch = !search || name.includes(search.toLowerCase());
+    const haystack = `${customerDisplayName(r.attributes?.user)} ${userName(r.attributes?.user)}`.toLowerCase();
+    const matchSearch = !search || haystack.includes(search.toLowerCase());
     const matchFav = !showFavoritesOnly || favorites.has(r.key);
     return matchSearch && matchFav;
   });
@@ -718,10 +882,30 @@ export function ChatManagement() {
                   >
                     {isUnread && <span className="unread-dot" />}
                     <div className="chat-item-avatar">
-                      <span style={{ fontSize: 14 }}>{userName(room.attributes?.user).charAt(0)}</span>
+                      <span style={{ fontSize: 14 }}>
+                        {(() => {
+                          const tckn = userName(room.attributes?.user);
+                          const name = tckn !== '—' ? getCustomerName(tckn) : undefined;
+                          const first = (name ?? tckn ?? '?').charAt(0);
+                          return (first || '?').toUpperCase();
+                        })()}
+                      </span>
                     </div>
                     <div className="chat-item-info">
-                      <div className="chat-item-name">{userName(room.attributes?.user)}</div>
+                      {(() => {
+                        const tckn = userName(room.attributes?.user);
+                        const name = tckn !== '—' ? getCustomerName(tckn) : undefined;
+                        return (
+                          <>
+                            <div className="chat-item-name">{tckn}</div>
+                            {name && (
+                              <div className="text-muted text-xs" style={{ lineHeight: 1.2 }}>
+                                {name}
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
                       <div className="chat-item-preview">
                         {(room.attributes?.members?.length ?? 0)} kişi ·{' '}
                         {room.attributes?.advisorId === ADVISOR_ID ? 'Asıl danışman' : 'Üye'}
@@ -750,9 +934,18 @@ export function ChatManagement() {
             <>
               <div className="chat-panel-header">
                 <div className="flex items-center gap-3">
-                  <h3 style={{ fontSize: 15, fontWeight: 600 }}>
-                    {userName(selectedRoom.attributes?.user)}
-                  </h3>
+                  {(() => {
+                    const tckn = userName(selectedRoom.attributes?.user);
+                    const name = tckn !== '—' ? getCustomerName(tckn) : undefined;
+                    return (
+                      <div className="flex flex-col" style={{ lineHeight: 1.2 }}>
+                        <span style={{ fontSize: 15, fontWeight: 600 }}>{tckn}</span>
+                        {name && (
+                          <span className="text-muted text-xs">{name}</span>
+                        )}
+                      </div>
+                    );
+                  })()}
                   <span
                     className="badge badge-sm"
                     style={{ '--badge-color': 'var(--color-muted)' } as React.CSSProperties}
@@ -767,21 +960,6 @@ export function ChatManagement() {
                     <Users size={14} />
                     Katılımcılar
                   </button>
-                  {selectedRoom.attributes?.roomType === 'rezervation' &&
-                    getRezervationIdForVideoCall(selectedRoom) && (
-                      <button
-                        type="button"
-                        className="btn btn-primary btn-sm"
-                        title="Görüntülü görüşmeyi uygulama içinde aç"
-                        onClick={() => {
-                          const rid = getRezervationIdForVideoCall(selectedRoom);
-                          if (rid) navigate(`/advisor/video-call?rezervation=${encodeURIComponent(rid)}`);
-                        }}
-                      >
-                        <Video size={14} />
-                        Görüntülü görüşme
-                      </button>
-                    )}
                   {isPrimaryAdvisor && !isRoomDeactivated && (
                     <button
                       className="btn btn-secondary btn-sm"
@@ -792,6 +970,14 @@ export function ChatManagement() {
                       Devret
                     </button>
                   )}
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={() => setNotesCustomer(userName(selectedRoom.attributes?.user))}
+                    title="Müşteri Notları"
+                  >
+                    <FileText size={14} />
+                    Müşteri Notları
+                  </button>
                   {isPrimaryAdvisor && (
                     <div
                       ref={statusDropdownRef}
@@ -853,7 +1039,7 @@ export function ChatManagement() {
                         >
                           {!m.isMine && (
                             <div className="chat-msg-sender">
-                              {m.sender?.replace(/@|:.*/g, '') || 'Müşteri'}
+                              {renderSenderName(m.sender)}
                             </div>
                           )}
                           <div className="chat-msg-body">{m.body ?? m.content ?? ''}</div>
@@ -991,13 +1177,18 @@ export function ChatManagement() {
               const role = (m.role ?? '').trim();
               const roleLabel = role === 'owner' ? 'Müşteri' : role === 'advisor' ? 'Asıl Danışman' : 'Üye';
               const canRemove = isPrimaryAdvisor && !isRoomDeactivated && role === 'member';
+              // owner ise TCKN → müşteri ismi, advisor/member ise sicil → advisor ismi.
+              // Resolve tamamlanana dek ham id'yi göstermek yerine rol etiketine düş.
+              const displayName = role === 'owner'
+                ? (getCustomerName(mid) ?? mid)
+                : (advisorNames[mid] ?? mid);
               return (
                 <li
                   key={mid}
                   className="flex items-center justify-between"
                   style={{ padding: '8px 0', borderBottom: '1px solid var(--color-border)' }}
                 >
-                  <span>{mid}</span>
+                  <span>{displayName}</span>
                   <div className="flex items-center gap-2">
                     <span className="badge badge-sm" style={{ '--badge-color': 'var(--color-muted)' } as React.CSSProperties}>
                       {roleLabel}
@@ -1074,6 +1265,15 @@ export function ChatManagement() {
           </div>
         )}
       </Modal>
+
+      <CustomerNotesModal
+        open={!!notesCustomer}
+        onClose={() => setNotesCustomer(null)}
+        customerLoginName={notesCustomer ?? ''}
+        customerTckn={notesCustomer ?? ''}
+        advisorLoginName={ADVISOR_ID}
+        customerDisplayName={notesCustomer ? getCustomerName(notesCustomer) ?? notesCustomer : undefined}
+      />
 
     </div>
   );

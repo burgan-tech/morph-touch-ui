@@ -1,13 +1,38 @@
 import { useEffect, useState, useCallback, useRef, Fragment } from 'react';
 import { MessageSquare, Send, Paperclip, Users } from 'lucide-react';
 import { useLocation } from 'react-router-dom';
-import { getChatRooms, getRoomMessages, sendRoomMessage, getMatrixSync } from '../../lib/api';
+import {
+  getChatRooms,
+  getRoomMessages,
+  sendRoomMessage,
+  getMatrixSync,
+  getInstance,
+  listInstances,
+} from '../../lib/api';
 import { formatTime, formatDate, cn } from '../../lib/utils';
 import { EmptyState, Modal, toast } from '../../components/ui';
 import { useCustomerContext } from '../../contexts/CustomerContext';
 
+type AdvisorWorkflow = 'portfolio-manager' | 'investment-advisor';
+
+function workflowFromAdvisorType(advisorType?: string): AdvisorWorkflow | null {
+  const t = (advisorType ?? '').trim().toUpperCase();
+  if (t === 'PM') return 'portfolio-manager';
+  if (t === 'IA') return 'investment-advisor';
+  return null;
+}
+
 const MAX_FILE_SIZE_MB = 10;
 const ALLOWED_EXTENSIONS = ['.xlsx', '.docx', '.pdf', '.jpg', '.jpeg', '.png'];
+
+// Matrix /sync long-poll back-off bounds.
+// Synapse can return quickly when device_lists / one_time_keys streams advance
+// (independent of our room filter), so we throttle the loop to avoid hammering
+// the runtime. The minimum interval applies even on happy responses; the idle
+// delay kicks in when the long-poll returned with no new room events.
+const SYNC_MIN_INTERVAL_MS = 2000;
+const SYNC_IDLE_DELAY_MS = 5000;
+const SYNC_ERROR_DELAY_MS = 3000;
 
 interface ChatRoomMember {
   memberId?: string;
@@ -198,7 +223,7 @@ function validateFile(file: File): string | null {
 }
 
 export function Chat() {
-  const { customerId } = useCustomerContext();
+  const { customerId, customerName } = useCustomerContext();
   const location = useLocation();
   const openAdvisorKey = (location.state as { openAdvisorKey?: string } | null)?.openAdvisorKey;
 
@@ -210,6 +235,10 @@ export function Chat() {
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
   const [participantsModal, setParticipantsModal] = useState(false);
+  // Map advisor key (e.g. "U02917") -> human-readable name (e.g. "MERVE YILDIZ").
+  // Populated lazily for every distinct advisorId across the customer's rooms
+  // so the chat list / header / participants modal can hide the sicil number.
+  const [advisorNames, setAdvisorNames] = useState<Record<string, string>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const openAdvisorTriedRef = useRef(false);
@@ -240,6 +269,83 @@ export function Chat() {
   useEffect(() => {
     fetchRooms();
   }, [fetchRooms]);
+
+  // Resolve advisor names for every advisor referenced by the active rooms so
+  // the chat list / header / participants modal can show "MERVE YILDIZ" instead
+  // of the raw sicil ("U02917"). Workflow is picked from advisorType (PM → portfolio-manager,
+  // IA → investment-advisor) with a best-effort fallback when type is missing.
+  useEffect(() => {
+    if (rooms.length === 0) return;
+    let cancelled = false;
+
+    type Target = { key: string; workflow: AdvisorWorkflow };
+    const seen = new Set<string>();
+    const targets: Target[] = [];
+    for (const r of rooms) {
+      const id = r.attributes?.advisorId;
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      const wf = workflowFromAdvisorType(r.attributes?.advisorType);
+      if (wf) targets.push({ key: id, workflow: wf });
+      else {
+        targets.push({ key: id, workflow: 'portfolio-manager' });
+        targets.push({ key: id, workflow: 'investment-advisor' });
+      }
+    }
+    const missing = targets.filter((t) => !advisorNames[t.key]);
+    if (missing.length === 0) return;
+
+    const buildName = (attrs: Record<string, unknown> | undefined): string => {
+      if (!attrs) return '';
+      const first = String(attrs.firstName ?? '').trim();
+      const last = String(attrs.lastName ?? '').trim();
+      return `${first} ${last}`.trim();
+    };
+
+    const fetchByKey = async (key: string, workflow: AdvisorWorkflow): Promise<string> => {
+      try {
+        const res = await getInstance(workflow, key);
+        if (res.ok && res.data) {
+          const d = res.data as { attributes?: Record<string, unknown> };
+          const name = buildName(d.attributes);
+          if (name) return name;
+        }
+      } catch {
+        /* fall back to list */
+      }
+      try {
+        const list = await listInstances(workflow, { pageSize: 100 });
+        if (list.ok && list.data) {
+          const items = (list.data as { items?: { key?: string; attributes?: Record<string, unknown> }[] }).items ?? [];
+          const match = items.find((i) => i.key === key);
+          if (match) return buildName(match.attributes);
+        }
+      } catch {
+        /* ignore */
+      }
+      return '';
+    };
+
+    (async () => {
+      const resolved = await Promise.all(
+        missing.map(async (t) => [t.key, await fetchByKey(t.key, t.workflow)] as const),
+      );
+      if (cancelled) return;
+      const updates = resolved.filter(([, name]) => name.length > 0);
+      if (updates.length === 0) return;
+      setAdvisorNames((prev) => {
+        const next = { ...prev };
+        for (const [k, name] of updates) {
+          if (!next[k]) next[k] = name;
+        }
+        return next;
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [rooms, advisorNames]);
 
   useEffect(() => {
     if (!openAdvisorKey || rooms.length === 0) return;
@@ -311,6 +417,9 @@ export function Chat() {
 
     const runSyncLoop = async () => {
       if (syncAbortedRef.current) return;
+      const startedAt = Date.now();
+      let hadRoomEvents = false;
+      let errored = false;
       try {
         const params: { user: string; timeout: string; roomId: string; since?: string } = {
           user: customerId,
@@ -320,21 +429,31 @@ export function Chat() {
         if (syncTokenRef.current) params.since = syncTokenRef.current;
 
         const res = await getMatrixSync(params);
+        if (syncAbortedRef.current) return;
         const syncData = extractSyncResponse(res);
-        if (!syncData || syncAbortedRef.current) return;
-
-        if (syncData.nextBatch) syncTokenRef.current = syncData.nextBatch;
-
-        const roomEvents = syncData.eventsByRoom?.[matrixRoomId];
-        if (Array.isArray(roomEvents) && roomEvents.length > 0) {
-          setMessages((prev) => mergeNewMessages(prev, roomEvents, customerId));
+        if (syncData) {
+          if (syncData.nextBatch) syncTokenRef.current = syncData.nextBatch;
+          const roomEvents = syncData.eventsByRoom?.[matrixRoomId];
+          if (Array.isArray(roomEvents) && roomEvents.length > 0) {
+            setMessages((prev) => mergeNewMessages(prev, roomEvents, customerId));
+            hadRoomEvents = true;
+          }
+        } else {
+          errored = true;
         }
       } catch {
-        // Will retry on next loop
+        errored = true;
       }
-      if (!syncAbortedRef.current) {
-        setTimeout(runSyncLoop, 0);
-      }
+      if (syncAbortedRef.current) return;
+      // Throttle: even if Synapse returns instantly (device_lists noise), keep at
+      // least SYNC_MIN_INTERVAL_MS between requests. Add extra idle / error delay
+      // when there is nothing new to merge so we are not polling 5×/sec.
+      const elapsed = Date.now() - startedAt;
+      let minDelay = SYNC_MIN_INTERVAL_MS;
+      if (errored) minDelay = Math.max(minDelay, SYNC_ERROR_DELAY_MS);
+      else if (!hadRoomEvents) minDelay = Math.max(minDelay, SYNC_IDLE_DELAY_MS);
+      const delay = Math.max(0, minDelay - elapsed);
+      setTimeout(runSyncLoop, delay);
     };
 
     runSyncLoop();
@@ -389,6 +508,29 @@ export function Chat() {
     }
   };
 
+  /** Matrix `@localpart:server` formatından kullanıcı dostu isim üret.
+   * Sıra: localpart customer mı (TCKN ile direkt veya "u" prefix) → customerName;
+   * advisorNames map'inde (case-insensitive) eşleşme var mı → o isim;
+   * yoksa son çare olarak "Danışman" — sicil/TCKN ekrana hiç çıkmaz. */
+  const renderSenderName = useCallback(
+    (sender?: string): string => {
+      const localpart = (sender ?? '').replace(/@|:.*/g, '').trim();
+      if (!localpart) return 'Danışman';
+      const lower = localpart.toLowerCase();
+      const cidLower = (customerId ?? '').toLowerCase();
+      if (cidLower && (lower === cidLower || lower === `u${cidLower}`)) {
+        return customerName ?? customerId ?? 'Müşteri';
+      }
+      const matchKey = Object.keys(advisorNames).find((k) => {
+        const kl = k.toLowerCase();
+        return kl === lower || `u${kl}` === lower || kl === `u${lower}`;
+      });
+      if (matchKey) return advisorNames[matchKey];
+      return 'Danışman';
+    },
+    [advisorNames, customerId, customerName],
+  );
+
   const retryFailedMessage = (msg: ChatMessage) => {
     if (!msg.body) return;
     setMessages((prev) => prev.filter((m) => m.eventId !== msg.eventId));
@@ -436,9 +578,21 @@ export function Chat() {
             ) : (
               rooms.map((room, index) => {
                 const isActive = selectedRoom?.key === room.key;
-                const advisorId = room.attributes?.advisorId ?? room.key ?? '';
+                const advisorId = room.attributes?.advisorId ?? '';
                 const advisorType = room.attributes?.advisorType ?? '';
-                const displayChar = (advisorId || advisorType || '?').charAt(0).toUpperCase();
+                // Sicil numarası yerine isim soyisim: advisorNames map'inden çek; yoksa
+                // resolve tamamlanana dek geçici olarak danışman tipi etiketini göster
+                // (TCKN/sicil hiçbir koşulda görünmesin).
+                const advisorDisplayName = advisorId ? advisorNames[advisorId] : '';
+                const advisorTypeLabel = advisorType === 'PM'
+                  ? 'Portföy Yöneticisi'
+                  : advisorType === 'IA'
+                    ? 'Yatırım Danışmanı'
+                    : '';
+                const advisorLabel = advisorDisplayName || advisorTypeLabel || 'Danışman';
+                const displayChar = (advisorDisplayName || advisorTypeLabel || advisorType || '?')
+                  .charAt(0)
+                  .toUpperCase();
                 return (
                   <div
                     key={room.key ?? room.id ?? `room-${index}`}
@@ -449,9 +603,9 @@ export function Chat() {
                       <span style={{ fontSize: 14 }}>{displayChar}</span>
                     </div>
                     <div className="chat-item-info">
-                      <div className="chat-item-name">{advisorId || '—'}</div>
+                      <div className="chat-item-name">{advisorLabel}</div>
                       <div className="chat-item-preview">
-                        {(room.attributes?.members?.length ?? 0)} kişi
+                        {advisorTypeLabel || `${room.attributes?.members?.length ?? 0} kişi`}
                       </div>
                     </div>
                   </div>
@@ -467,7 +621,17 @@ export function Chat() {
               <div className="chat-panel-header">
                 <div className="flex items-center gap-3">
                   <h3 style={{ fontSize: 15, fontWeight: 600 }}>
-                    {selectedRoom.attributes?.advisorId || selectedRoom.key || 'Sohbet'}
+                    {(() => {
+                      const aid = selectedRoom.attributes?.advisorId ?? '';
+                      const at = selectedRoom.attributes?.advisorType ?? '';
+                      const name = aid ? advisorNames[aid] : '';
+                      const typeLabel = at === 'PM'
+                        ? 'Portföy Yöneticisi'
+                        : at === 'IA'
+                          ? 'Yatırım Danışmanı'
+                          : '';
+                      return name || typeLabel || 'Sohbet';
+                    })()}
                   </h3>
                   <span className="badge badge-sm" style={{ '--badge-color': 'var(--color-muted)' } as React.CSSProperties}>
                     {selectedRoom.attributes?.roomType === 'permanent' ? 'Kalıcı' : selectedRoom.attributes?.roomType === 'rezervation' ? 'Randevu' : 'Sohbet'}
@@ -502,7 +666,7 @@ export function Chat() {
                         >
                           {!m.isMine && (
                             <div className="chat-msg-sender">
-                              {m.sender?.replace(/@|:.*/g, '') || 'Danışman'}
+                              {renderSenderName(m.sender)}
                             </div>
                           )}
                           <div className="chat-msg-body">{m.body ?? m.content ?? ''}</div>
@@ -602,13 +766,18 @@ export function Chat() {
             const mid = (m.memberId ?? '').trim();
             const role = (m.role ?? '').trim();
             const roleLabel = role === 'owner' ? 'Müşteri' : role === 'advisor' ? 'Asıl Danışman' : 'Üye';
+            // Sicil (advisor) veya TCKN (customer) yerine ekrana isim soyisim yansıt:
+            // owner ise CustomerContext'teki customerName; advisor ise advisorNames map.
+            const displayName = role === 'owner'
+              ? (customerName ?? mid)
+              : (advisorNames[mid] ?? mid);
             return (
               <li
                 key={mid}
                 className="flex items-center justify-between"
                 style={{ padding: '8px 0', borderBottom: '1px solid var(--color-border)' }}
               >
-                <span>{mid}</span>
+                <span>{displayName}</span>
                 <span className="badge badge-sm" style={{ '--badge-color': 'var(--color-muted)' } as React.CSSProperties}>
                   {roleLabel}
                 </span>

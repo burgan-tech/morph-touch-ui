@@ -5,16 +5,17 @@ import {
   Search,
   UserPlus,
   XCircle,
-  FileText,
-  User,
   Clock,
   Video,
   RefreshCw,
+  FileText,
 } from 'lucide-react';
-import { getReservations, runTransition, startInstance } from '../../lib/api';
+import { getReservations, runTransition, startInstance, getInstance } from '../../lib/api';
 import { formatDateTime } from '../../lib/utils';
 import { Badge, Card, CardHeader, CardBody, EmptyState, Modal, toast } from '../../components/ui';
+import { CustomerNotesModal } from '../../components/CustomerNotesModal';
 import { useAdvisorContext } from '../../contexts/AdvisorContext';
+import { getCustomerName } from '../../data/customers';
 
 interface ReservationInstance {
   key: string;
@@ -147,6 +148,11 @@ export function Appointments() {
   const [cancelModal, setCancelModal] = useState<ReservationInstance | null>(null);
   const [cancelLoading, setCancelLoading] = useState(false);
   const [startMeetLoading, setStartMeetLoading] = useState<string | null>(null);
+  const [videoCallModal, setVideoCallModal] = useState<{
+    reservation: ReservationInstance;
+    status: 'starting' | 'waiting' | 'ready';
+    videoUrl: string | null;
+  } | null>(null);
   const navigate = useNavigate();
 
   const fetchReservations = useCallback(async (filters: { startDate: string; endDate: string; status: string }) => {
@@ -182,9 +188,66 @@ export function Appointments() {
     fetchReservations(appliedFilters);
   }, [fetchReservations, appliedFilters]);
 
+  useEffect(() => {
+    if (!videoCallModal || videoCallModal.status !== 'waiting' || !ADVISOR_ID) return;
+    const r = videoCallModal.reservation;
+    const id = r.id ?? r.key;
+    const advRef = r.attributes?.advisor;
+    const advisorAttrKey =
+      typeof advRef === 'string'
+        ? advRef
+        : advRef && typeof advRef === 'object' && 'key' in advRef
+          ? String((advRef as { key: string }).key)
+          : '';
+    let cancelled = false;
+
+    const pickAdvisorUrl = (urls: Record<string, string>[]): string | null => {
+      for (const u of urls) {
+        if (!u) continue;
+        if (ADVISOR_ID in u && u[ADVISOR_ID]) return u[ADVISOR_ID];
+      }
+      if (advisorAttrKey) {
+        for (const u of urls) {
+          if (!u) continue;
+          if (advisorAttrKey in u && u[advisorAttrKey]) return u[advisorAttrKey];
+        }
+      }
+      return null;
+    };
+
+    const poll = async () => {
+      try {
+        const res = await getInstance('rezervation', id);
+        if (cancelled) return;
+        const data = res.data as {
+          attributes?: { videoCallUrls?: Record<string, string>[] };
+          videoCallUrls?: Record<string, string>[];
+        } | null;
+        const urls = data?.attributes?.videoCallUrls ?? data?.videoCallUrls;
+        if (urls && Array.isArray(urls) && urls.length > 0) {
+          const url = pickAdvisorUrl(urls);
+          if (url) {
+            window.open(url, '_blank', 'noopener,noreferrer');
+            setVideoCallModal((prev) => (prev ? { ...prev, status: 'ready', videoUrl: url } : null));
+            return;
+          }
+        }
+      } catch {
+        /* retry */
+      }
+      if (!cancelled) setTimeout(poll, 3000);
+    };
+    const timer = setTimeout(poll, 2000);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [videoCallModal?.status, videoCallModal?.reservation?.key, ADVISOR_ID]);
+
   const handleStartVideoMeet = async (r: ReservationInstance) => {
     if (!r.key) return;
     setStartMeetLoading(r.key);
+    setVideoCallModal({ reservation: r, status: 'starting', videoUrl: null });
     try {
       const res = await startInstance('rezervation-start', {
         key: `rezervation-start-${Date.now()}`,
@@ -192,15 +255,18 @@ export function Appointments() {
         attributes: { randevuKey: r.key, participantType: 'advisor' },
       });
       if (res.ok) {
+        setVideoCallModal((prev) => (prev ? { ...prev, status: 'waiting' } : null));
         fetchReservations(appliedFilters);
         const rezervationId = encodeURIComponent(r.id ?? r.key);
         navigate(`/advisor/video-call?rezervation=${rezervationId}`);
       } else {
         const err = (res.data as Record<string, unknown>)?.error ?? 'Görüşme başlatılamadı';
         toast(String(err), 'error');
+        setVideoCallModal(null);
       }
     } catch (e) {
       toast(String(e), 'error');
+      setVideoCallModal(null);
     } finally {
       setStartMeetLoading(null);
     }
@@ -295,14 +361,16 @@ export function Appointments() {
                   </div>
                 </td>
                 <td>
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-secondary"
-                    onClick={() => setCustomerModal({ user: userName(r.attributes?.user) })}
-                  >
-                    <User size={14} />
-                    {userName(r.attributes?.user)}
-                  </button>
+                  {(() => {
+                    const tckn = userName(r.attributes?.user);
+                    const name = tckn !== '—' ? getCustomerName(tckn) : undefined;
+                    return (
+                      <div className="flex flex-col" style={{ lineHeight: 1.25 }}>
+                        <span className="font-medium">{tckn}</span>
+                        {name && <span className="text-muted text-xs">{name}</span>}
+                      </div>
+                    );
+                  })()}
                 </td>
                 <td>
                   <Badge state={state} />
@@ -339,6 +407,15 @@ export function Appointments() {
                     >
                       <UserPlus size={14} />
                       Kişi ekle
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-secondary"
+                      onClick={() => setCustomerModal({ user: userName(r.attributes?.user) })}
+                      title="Müşteri Notları"
+                    >
+                      <FileText size={14} />
+                      Müşteri Notları
                     </button>
                     <button
                       type="button"
@@ -455,28 +532,19 @@ export function Appointments() {
         </Card>
       </div>
 
-      {/* Customer card modal */}
-      <Modal
+      {/* Customer notes modal -- shared with /advisor/chat. */}
+      <CustomerNotesModal
         open={!!customerModal}
         onClose={() => setCustomerModal(null)}
-        title="Müşteri Bilgileri"
-      >
-        {customerModal && (
-          <>
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center gap-2">
-                <User size={18} />
-                <span className="font-medium">{customerModal.user}</span>
-              </div>
-              <p className="text-muted text-sm">Müşteri detayları placeholder</p>
-              <button type="button" className="btn btn-secondary" disabled title="Plan dahilinde değil">
-                <FileText size={16} />
-                Memo Ekle
-              </button>
-            </div>
-          </>
-        )}
-      </Modal>
+        customerLoginName={customerModal?.user ?? ''}
+        customerTckn={customerModal?.user ?? ''}
+        advisorLoginName={ADVISOR_ID}
+        customerDisplayName={
+          customerModal?.user
+            ? getCustomerName(customerModal.user) ?? customerModal.user
+            : undefined
+        }
+      />
 
       {/* Kişi ekle — add-participant-to-rezervation */}
       <Modal
@@ -547,6 +615,55 @@ export function Appointments() {
         <p>Bu randevuyu iptal etmek istediğinize emin misiniz?</p>
       </Modal>
 
+      {/* Görüntülü görüşme — müşteri dashboard ile aynı akış; URL hazır olunca yeni sekme */}
+      <Modal
+        open={!!videoCallModal}
+        onClose={() => setVideoCallModal(null)}
+        title="Görüntülü Görüşme"
+        footer={
+          videoCallModal?.status === 'ready' && videoCallModal.videoUrl ? (
+            <>
+              <button type="button" className="btn btn-secondary" onClick={() => setVideoCallModal(null)}>
+                Kapat
+              </button>
+              <a
+                href={videoCallModal.videoUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="btn btn-primary"
+              >
+                <Video size={16} /> Yeni sekmede aç
+              </a>
+            </>
+          ) : (
+            <button type="button" className="btn btn-secondary" onClick={() => setVideoCallModal(null)}>
+              İptal
+            </button>
+          )
+        }
+      >
+        {videoCallModal?.status === 'starting' && (
+          <div style={{ textAlign: 'center', padding: 32 }}>
+            <RefreshCw size={32} className="animate-spin" style={{ margin: '0 auto 16px', display: 'block' }} />
+            <p>Bağlantınız kuruluyor...</p>
+          </div>
+        )}
+        {videoCallModal?.status === 'waiting' && (
+          <div style={{ textAlign: 'center', padding: 32 }}>
+            <Video size={48} strokeWidth={1.5} style={{ margin: '0 auto 16px', display: 'block', color: 'var(--color-primary)' }} />
+            <p style={{ fontWeight: 600, fontSize: 16, marginBottom: 8 }}>Görüşme bağlantısı hazırlanıyor</p>
+            <p className="text-muted">Hazır olduğunda görüntülü görüşme yeni sekmede açılacaktır.</p>
+            <RefreshCw size={20} className="animate-spin" style={{ margin: '16px auto 0', display: 'block', color: 'var(--color-muted)' }} />
+          </div>
+        )}
+        {videoCallModal?.status === 'ready' && (
+          <div style={{ textAlign: 'center', padding: 32 }}>
+            <Video size={48} strokeWidth={1.5} style={{ margin: '0 auto 16px', display: 'block', color: 'var(--color-success, #16a34a)' }} />
+            <p style={{ fontWeight: 600, fontSize: 16 }}>Görüntülü görüşme hazır</p>
+            <p className="text-muted">Bağlantı yeni sekmede açıldı; tekrar açmak için aşağıdaki butonu kullanın.</p>
+          </div>
+        )}
+      </Modal>
     </div>
   );
 }

@@ -49,6 +49,15 @@ function advisorDisplayName(inst: VnextInstance): string {
   return (a.registryNumber as string) || (a.advisorId as string) || inst.key || '—';
 }
 
+/** Returns "FIRSTNAME LASTNAME" if the runtime instance has them filled, else ''. */
+function advisorFullName(inst: VnextInstance): string {
+  const a = inst.attributes ?? {};
+  const first = ((a.firstName as string) ?? '').trim();
+  const last = ((a.lastName as string) ?? '').trim();
+  const full = `${first} ${last}`.trim();
+  return full;
+}
+
 function advisorRole(inst: VnextInstance): string {
   if (inst._source === 'IA') return 'YD';
   if (inst._source === 'PM') return 'PY';
@@ -442,8 +451,12 @@ export function AbsenceManagement() {
 
   const filteredAdvisors = advisors.filter((a) => {
     if (!advisorSearch) return true;
-    const q = advisorSearch.toLowerCase();
-    return advisorDisplayName(a).toLowerCase().includes(q) || advisorRole(a).toLowerCase().includes(q);
+    const q = advisorSearch.toLocaleLowerCase('tr');
+    return (
+      advisorDisplayName(a).toLocaleLowerCase('tr').includes(q) ||
+      advisorFullName(a).toLocaleLowerCase('tr').includes(q) ||
+      advisorRole(a).toLocaleLowerCase('tr').includes(q)
+    );
   });
 
   /* ── Render ── */
@@ -626,9 +639,15 @@ export function AbsenceManagement() {
                       {filteredAdvisors.map((a) => {
                         const entry = advisorWhEntries[a.key];
                         const hasCustom = !!entry;
+                        const fullName = advisorFullName(a);
                         return (
                           <tr key={a.key + (a._source ?? '')}>
-                            <td className="font-medium">{advisorDisplayName(a)}</td>
+                            <td>
+                              <div className="flex flex-col" style={{ lineHeight: 1.25 }}>
+                                <span className="font-medium">{advisorDisplayName(a)}</span>
+                                {fullName && <span className="text-muted text-xs">{fullName}</span>}
+                              </div>
+                            </td>
                             <td><Badge state={advisorRole(a)} /></td>
                             <td>
                               {hasCustom ? (
@@ -855,7 +874,11 @@ export function AbsenceManagement() {
       <Modal
         open={advisorWhModalOpen}
         onClose={() => { setAdvisorWhModalOpen(false); setSelectedAdvisor(null); }}
-        title={selectedAdvisor ? `${advisorDisplayName(selectedAdvisor)} – Özel Çalışma Saatleri` : 'Özel Çalışma Saatleri'}
+        title={
+          selectedAdvisor
+            ? `${advisorDisplayName(selectedAdvisor)}${advisorFullName(selectedAdvisor) ? ` – ${advisorFullName(selectedAdvisor)}` : ''} – Özel Çalışma Saatleri`
+            : 'Özel Çalışma Saatleri'
+        }
         footer={
           <>
             <button className="btn btn-secondary" onClick={() => { setAdvisorWhModalOpen(false); setSelectedAdvisor(null); }}>
