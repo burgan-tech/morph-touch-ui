@@ -24,7 +24,7 @@ export const CUSTOMERS: CustomerMock[] = [
     // aktif odanın advisor'ı buradan farklıysa DB'den gelen değer ekranda
     // bu fixture'ı ezer (bkz. pages/customer/Dashboard.tsx).
     customerId: '10928922766',
-    segment: 'Private Plus',
+    segment: 'Private',
     label: 'ABDURRAHMAN KIRANLI',
     pmKey: 'U02917',
     iaKey: 'U000513',
