@@ -5,7 +5,7 @@ import { formatDate, formatTime, cn } from '../lib/utils';
 import { EmptyState, toast } from './ui';
 import { customerDisplayName, getCustomerName } from '../data/customers';
 
-const SYNC_MIN_INTERVAL_MS = 2000;
+const SYNC_MIN_INTERVAL_MS = 200;
 const SYNC_IDLE_DELAY_MS = 5000;
 const SYNC_ERROR_DELAY_MS = 3000;
 const PENDING_PREFIX = 'pending-';

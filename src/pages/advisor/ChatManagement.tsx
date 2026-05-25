@@ -28,7 +28,7 @@ const ALLOWED_EXTENSIONS = ['.xlsx', '.docx', '.pdf', '.jpg', '.jpeg', '.png'];
 // (independent of our room filter), so we throttle the loop to avoid hammering
 // the runtime. The minimum interval applies even on happy responses; the idle
 // delay kicks in when the long-poll returned with no new room events.
-const SYNC_MIN_INTERVAL_MS = 2000;
+const SYNC_MIN_INTERVAL_MS = 200;
 const SYNC_IDLE_DELAY_MS = 5000;
 const SYNC_ERROR_DELAY_MS = 3000;
 

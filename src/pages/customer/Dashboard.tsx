@@ -252,12 +252,13 @@ export function Dashboard() {
   const [loadingRes, setLoadingRes] = useState(true);
   const [loadingRooms, setLoadingRooms] = useState(true);
   const [messageLoading, setMessageLoading] = useState<string | null>(null);
-  const [bookModal, setBookModal] = useState<{ advisorKey: string; advisorType: 'PM' | 'IA' } | null>(null);
+  const [bookModal, setBookModal] = useState<{ advisorKey: string; advisorType: 'PM' | 'IA'; instanceId: string } | null>(null);
   const [bookDate, setBookDate] = useState('');
   const [slots, setSlots] = useState<{ start: string; end: string }[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [selectedSlot, setSelectedSlot] = useState<{ start: string; end: string } | null>(null);
   const [bookSaving, setBookSaving] = useState(false);
+  const [openingBook, setOpeningBook] = useState<string | null>(null);
   const [editModal, setEditModal] = useState<ReservationInstance | null>(null);
   const [editDate, setEditDate] = useState('');
   const [editSlots, setEditSlots] = useState<{ start: string; end: string }[]>([]);
@@ -275,14 +276,6 @@ export function Dashboard() {
     status: 'starting' | 'waiting' | 'ready';
     videoUrl: string | null;
   } | null>(null);
-  const [confirmReservation, setConfirmReservation] = useState<{ instanceId: string } | null>(null);
-  const [confirmReservationSnapshot, setConfirmReservationSnapshot] = useState<{
-    advisor: string;
-    startDateTime: string;
-    endDateTime: string;
-  } | null>(null);
-  const [confirmReservationPolling, setConfirmReservationPolling] = useState(false);
-  const [confirmReservationTransitioning, setConfirmReservationTransitioning] = useState(false);
   const [reservationSuccessModalOpen, setReservationSuccessModalOpen] = useState(false);
   const [advisorPresence, setAdvisorPresence] = useState<Record<string, AdvisorPresence>>({});
   // Map advisor key (e.g. "U02917") -> human-readable name (e.g. "MERVE YILDIZ").
@@ -487,150 +480,6 @@ export function Dashboard() {
     };
   }, [videoCallModal?.status, videoCallModal?.reservation.key, customerId]);
 
-  useEffect(() => {
-    const instanceId = confirmReservation?.instanceId;
-    if (!instanceId) return;
-    let cancelled = false;
-    let attempts = 0;
-    const maxAttempts = 45;
-    const pollMs = 650;
-
-    const tick = async () => {
-      if (cancelled) return;
-      attempts += 1;
-      try {
-        const res = await getInstance('rezervation', instanceId);
-        if (cancelled) return;
-        if (!res.ok) {
-          if (attempts >= maxAttempts) {
-            toast('Randevu bilgisi alınamadı.', 'error');
-            setConfirmReservation(null);
-            setConfirmReservationSnapshot(null);
-            setConfirmReservationPolling(false);
-            return;
-          }
-          setTimeout(tick, pollMs);
-          return;
-        }
-        const d = res.data as Record<string, unknown> | null;
-        const currentState = extractWorkflowCurrentState(d);
-        const attrs = (d?.attributes ?? {}) as Record<string, unknown>;
-
-        if (currentState === 'slot-unavailable') {
-          toast('Bu slot artık müsait değil; lütfen başka bir slot seçin.', 'error');
-          setConfirmReservation(null);
-          setConfirmReservationSnapshot(null);
-          setConfirmReservationPolling(false);
-          return;
-        }
-        if (currentState === 'appointment-form') {
-          setConfirmReservationSnapshot({
-            advisor: String(attrs.advisor ?? ''),
-            startDateTime: String(attrs.startDateTime ?? ''),
-            endDateTime: String(attrs.endDateTime ?? ''),
-          });
-          setConfirmReservationPolling(false);
-          return;
-        }
-        if (attempts >= maxAttempts) {
-          toast('Randevu onayı için hazır olunamadı; lütfen tekrar deneyin.', 'error');
-          setConfirmReservation(null);
-          setConfirmReservationSnapshot(null);
-          setConfirmReservationPolling(false);
-          return;
-        }
-        setTimeout(tick, pollMs);
-      } catch {
-        if (cancelled) return;
-        if (attempts >= maxAttempts) {
-          toast('Randevu bilgisi alınamadı.', 'error');
-          setConfirmReservation(null);
-          setConfirmReservationSnapshot(null);
-          setConfirmReservationPolling(false);
-          return;
-        }
-        setTimeout(tick, pollMs);
-      }
-    };
-
-    setConfirmReservationPolling(true);
-    setConfirmReservationSnapshot(null);
-    tick();
-    return () => {
-      cancelled = true;
-    };
-  }, [confirmReservation?.instanceId]);
-
-  const closeConfirmReservationModal = () => {
-    setConfirmReservation(null);
-    setConfirmReservationSnapshot(null);
-    setConfirmReservationPolling(false);
-    setConfirmReservationTransitioning(false);
-  };
-
-  const handleConfirmReservationTransition = async () => {
-    const instanceId = confirmReservation?.instanceId;
-    if (!instanceId) return;
-    setConfirmReservationTransitioning(true);
-    try {
-      const confirmRes = await runTransition('rezervation', instanceId, 'confirm-selection', {});
-      if (!confirmRes.ok) {
-        toast(
-          String(
-            (confirmRes.data as Record<string, unknown>)?.detail
-              ?? (confirmRes.data as Record<string, unknown>)?.error
-              ?? 'Onaylanamadı'
-          ),
-          'error'
-        );
-        return;
-      }
-      let stateStr = extractWorkflowCurrentState(confirmRes.data);
-      if (stateStr === 'slot-unavailable') {
-        toast('Bu slot artık müsait değil; lütfen başka bir slot seçin.', 'error');
-        closeConfirmReservationModal();
-        return;
-      }
-      if (stateStr !== 'active') {
-        for (let i = 0; i < 14 && stateStr !== 'active' && stateStr !== 'slot-unavailable'; i += 1) {
-          await delay(320);
-          const gi = await getInstance('rezervation', instanceId);
-          if (gi.ok && gi.data != null) {
-            stateStr = extractWorkflowCurrentState(gi.data);
-          }
-        }
-      }
-      if (stateStr === 'slot-unavailable') {
-        toast('Bu slot artık müsait değil; lütfen başka bir slot seçin.', 'error');
-        closeConfirmReservationModal();
-        return;
-      }
-      if (stateStr === 'active') {
-        closeConfirmReservationModal();
-        setReservationSuccessModalOpen(true);
-        return;
-      }
-      // Geçiş başarılı ama yanıtta state yok / farklı şekilde: boş state veya okunamayan gövde → başarı kabul et
-      if (stateStr === '') {
-        closeConfirmReservationModal();
-        setReservationSuccessModalOpen(true);
-        return;
-      }
-      toast(
-        String(
-          (confirmRes.data as Record<string, unknown>)?.detail
-            ?? (confirmRes.data as Record<string, unknown>)?.error
-            ?? 'Randevu tamamlanamadı'
-        ),
-        'error'
-      );
-    } catch (e) {
-      toast(String(e), 'error');
-    } finally {
-      setConfirmReservationTransitioning(false);
-    }
-  };
-
   const handleReservationSuccessAck = () => {
     setReservationSuccessModalOpen(false);
     void fetchReservations();
@@ -716,11 +565,38 @@ export function Dashboard() {
     }
   };
 
-  const openBookModal = (advisorKey: string, advisorType: 'PM' | 'IA') => {
-    setBookModal({ advisorKey, advisorType });
-    setBookDate('');
-    setSlots([]);
-    setSelectedSlot(null);
+  const openBookModal = async (advisorKey: string, advisorType: 'PM' | 'IA') => {
+    if (!customerId) return;
+    setOpeningBook(advisorKey);
+    try {
+      const key = `rez-${customerId}-${Date.now()}`;
+      const startRes = await startInstance(
+        'rezervation',
+        {
+          key,
+          tags: ['appointment', 'randevu'],
+          attributes: {},
+        },
+        { sub: customerId }
+      );
+      if (!startRes.ok) {
+        toast(String((startRes.data as Record<string, unknown>)?.error ?? 'Randevu oluşturulamadı'), 'error');
+        return;
+      }
+      const instanceId = (startRes.data as { id?: string })?.id;
+      if (!instanceId) {
+        toast('Randevu instance kimliği alınamadı.', 'error');
+        return;
+      }
+      setBookModal({ advisorKey, advisorType, instanceId });
+      setBookDate('');
+      setSlots([]);
+      setSelectedSlot(null);
+    } catch (e) {
+      toast(String(e), 'error');
+    } finally {
+      setOpeningBook(null);
+    }
   };
 
   const loadSlots = async () => {
@@ -781,44 +657,58 @@ export function Dashboard() {
     if (!customerId || !bookModal || !selectedSlot) return;
     setBookSaving(true);
     try {
-      const key = `rez-${customerId}-${Date.now()}`;
       const startDateTime = toUtcIsoFromDateAndTime(bookDate, selectedSlot.start);
       const endDateTime = toUtcIsoFromDateAndTime(bookDate, selectedSlot.end);
-      const startRes = await startInstance(
-        'rezervation',
-        {
-          key,
-          tags: ['appointment', 'randevu'],
-          attributes: {
-            user: customerId,
-            advisor: bookModal.advisorKey,
-            startDateTime,
-            endDateTime,
-          },
+      const confirmRes = await runTransition('rezervation', bookModal.instanceId, 'confirm-selection', {
+        attributes: {
+          user: customerId,
+          advisor: bookModal.advisorKey,
+          advisorType: bookModal.advisorType,
+          startDateTime,
+          endDateTime,
         },
-        { sub: customerId }
-      );
-      if (!startRes.ok) {
-        toast(String((startRes.data as Record<string, unknown>)?.error ?? 'Randevu oluşturulamadı'), 'error');
+      });
+      if (!confirmRes.ok) {
+        toast(
+          String(
+            (confirmRes.data as Record<string, unknown>)?.detail
+              ?? (confirmRes.data as Record<string, unknown>)?.error
+              ?? 'Randevu onaylanamadı'
+          ),
+          'error'
+        );
         return;
       }
-      const instId = (startRes.data as { id?: string })?.id;
-      if (!instId) {
-        toast('Randevu oluşturuldu; onay için danışman ile iletişime geçin.', 'success');
+      let stateStr = extractWorkflowCurrentState(confirmRes.data);
+      if (stateStr !== 'active' && stateStr !== 'slot-unavailable') {
+        for (let i = 0; i < 14 && stateStr !== 'active' && stateStr !== 'slot-unavailable'; i += 1) {
+          await delay(320);
+          const gi = await getInstance('rezervation', bookModal.instanceId);
+          if (gi.ok && gi.data != null) {
+            stateStr = extractWorkflowCurrentState(gi.data);
+          }
+        }
+      }
+      if (stateStr === 'slot-unavailable') {
+        toast('Bu slot artık müsait değil; lütfen başka bir slot seçin.', 'error');
+        return;
+      }
+      if (stateStr === 'active' || stateStr === '') {
         setBookModal(null);
         setBookDate('');
         setSlots([]);
         setSelectedSlot(null);
-        fetchReservations();
+        setReservationSuccessModalOpen(true);
         return;
       }
-      setBookModal(null);
-      setBookDate('');
-      setSlots([]);
-      setSelectedSlot(null);
-      setConfirmReservationSnapshot(null);
-      setConfirmReservationPolling(true);
-      setConfirmReservation({ instanceId: instId });
+      toast(
+        String(
+          (confirmRes.data as Record<string, unknown>)?.detail
+            ?? (confirmRes.data as Record<string, unknown>)?.error
+            ?? 'Randevu tamamlanamadı'
+        ),
+        'error'
+      );
     } catch (e) {
       toast(String(e), 'error');
     } finally {
@@ -993,11 +883,15 @@ export function Dashboard() {
                       {isPrivatePlus && (
                         <button
                           className="btn btn-secondary btn-sm"
-                          disabled={revs.length >= 2 || isOnLeave}
+                          disabled={revs.length >= 2 || isOnLeave || openingBook === key}
                           title={isOnLeave ? onLeaveTooltip : undefined}
                           onClick={() => openBookModal(key, type)}
                         >
-                          <CalendarDays size={14} />
+                          {openingBook === key ? (
+                            <RefreshCw size={14} className="animate-spin" />
+                          ) : (
+                            <CalendarDays size={14} />
+                          )}
                           Randevu Al
                         </button>
                       )}
@@ -1211,65 +1105,6 @@ export function Dashboard() {
                 )}
               </div>
             )}
-          </div>
-        )}
-      </Modal>
-
-      {/* Randevu özeti ve onay (confirm-selection) */}
-      <Modal
-        open={!!confirmReservation}
-        onClose={closeConfirmReservationModal}
-        title="Randevu özeti"
-        footer={
-          <>
-            <button type="button" className="btn btn-secondary" onClick={closeConfirmReservationModal}>
-              İptal
-            </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={
-                confirmReservationPolling
-                || !confirmReservationSnapshot
-                || confirmReservationTransitioning
-              }
-              onClick={() => void handleConfirmReservationTransition()}
-            >
-              {confirmReservationTransitioning ? (
-                <RefreshCw size={16} className="animate-spin" />
-              ) : (
-                'Onayla'
-              )}
-            </button>
-          </>
-        }
-      >
-        {confirmReservationPolling && !confirmReservationSnapshot && (
-          <div style={{ textAlign: 'center', padding: 24 }}>
-            <RefreshCw size={28} className="animate-spin" style={{ margin: '0 auto 12px', display: 'block' }} />
-            <p className="text-muted">Randevu bilgileri yükleniyor…</p>
-          </div>
-        )}
-        {confirmReservationSnapshot && (
-          <div
-            className="form-row"
-            style={{ flexDirection: 'column', gap: 12, alignItems: 'flex-start' }}
-          >
-            <p>
-              <span className="text-muted">Danışman</span>
-              <br />
-              <strong>{confirmReservationSnapshot.advisor || '—'}</strong>
-            </p>
-            <p>
-              <span className="text-muted">Başlangıç</span>
-              <br />
-              <strong>{formatDateTime(confirmReservationSnapshot.startDateTime) || '—'}</strong>
-            </p>
-            <p>
-              <span className="text-muted">Bitiş</span>
-              <br />
-              <strong>{formatDateTime(confirmReservationSnapshot.endDateTime) || '—'}</strong>
-            </p>
           </div>
         )}
       </Modal>
